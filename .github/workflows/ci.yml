@@ -19,7 +19,7 @@ jobs:
             wlroots0.20 wayland wayland-protocols libxkbcommon libinput pixman \
             libxcb xcb-util-wm cairo pango xorg-xwayland \
             xclip wl-clipboard waypipe file ttf-dejavu
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Configure
         run: |
           if [ "${{ matrix.sanitize }}" = none ]; then
@@ -39,7 +39,7 @@ jobs:
           meson test -C build --print-errorlogs
       - name: Upload test logs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: test-logs-${{ matrix.sanitize }}
           path: |
