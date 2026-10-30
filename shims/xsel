@@ -1,0 +1,55 @@
+#!/bin/sh
+# xsel shim for WaylandX: same idea as the xclip shim (see there).
+set -u
+
+real() {
+	self_dir=$(cd "$(dirname "$0")" && pwd)
+	old_ifs=$IFS
+	IFS=:
+	for d in $PATH; do
+		[ "$d" = "$self_dir" ] && continue
+		if [ -x "$d/xsel" ]; then
+			IFS=$old_ifs
+			exec "$d/xsel" "$@"
+		fi
+	done
+	IFS=$old_ifs
+	echo "xsel: real xsel not found" >&2
+	exit 1
+}
+
+if [ -z "${WAYLANDX_SOCK:-}" ] || ! command -v wl-copy >/dev/null 2>&1; then
+	real "$@"
+fi
+
+flag="--primary" mode="" append=0
+[ -t 0 ] || mode=in
+for a in "$@"; do
+	case "$a" in
+	-b|--clipboard) flag="" ;;
+	-p|--primary) flag="--primary" ;;
+	-s|--secondary) real "$@" ;;
+	-i|--input) mode=in ;;
+	-o|--output) mode=out ;;
+	-a|--append) mode=in; append=1 ;;
+	-c|--clear) mode=clear ;;
+	-d|--delete) mode=clear ;;
+	-n|--nodetach|-k|--keep|-x|--exchange|-t|--selectionTimeout|-l|--logfile|-v|--verbose|-z|--zeroflag) ;;
+	--display) ;;
+	-h|--help|--version) real "$a" ;;
+	*) real "$@" ;;
+	esac
+done
+[ -n "$mode" ] || mode=out
+
+case "$mode" in
+out) exec wl-paste $flag -n ;;
+clear) exec wl-copy $flag --clear ;;
+in)
+	if [ $append -eq 1 ]; then
+		{ wl-paste $flag -n 2>/dev/null; cat; } | wl-copy $flag
+	else
+		wl-copy $flag
+	fi
+	;;
+esac

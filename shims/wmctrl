@@ -1,0 +1,148 @@
+#!/bin/sh
+# wmctrl shim for WaylandX: lists and controls Wayland *and* X11 windows via
+# waylandxctl. Window ids are WaylandX ids printed as 0x%08x.
+set -u
+
+CTL=${WAYLANDXCTL:-waylandxctl}
+
+real() {
+	self_dir=$(cd "$(dirname "$0")" && pwd)
+	old_ifs=$IFS
+	IFS=:
+	for d in $PATH; do
+		[ "$d" = "$self_dir" ] && continue
+		if [ -x "$d/wmctrl" ]; then
+			IFS=$old_ifs
+			exec "$d/wmctrl" "$@"
+		fi
+	done
+	IFS=$old_ifs
+	echo "wmctrl: real wmctrl not found" >&2
+	exit 1
+}
+
+[ -n "${WAYLANDX_SOCK:-}" ] || real "$@"
+
+list=0 pid=0 geom=0 class=0 by_id=0 exact=0
+action="" target="" ewmh="" state="" desk="" switch="" desktops=0 wminfo=0
+
+while getopts "lpGxiFa:c:r:e:b:t:s:dmhR:" opt; do
+	case "$opt" in
+	l) list=1 ;;
+	p) pid=1 ;;
+	G) geom=1 ;;
+	x) class=1 ;;
+	i) by_id=1 ;;
+	F) exact=1 ;;
+	a) action=activate; target=$OPTARG ;;
+	R) action=activate; target=$OPTARG ;;
+	c) action=close; target=$OPTARG ;;
+	r) target=$OPTARG ;;
+	e) ewmh=$OPTARG ;;
+	b) state=$OPTARG ;;
+	t) desk=$OPTARG ;;
+	s) switch=$OPTARG ;;
+	d) desktops=1 ;;
+	m) wminfo=1 ;;
+	h) echo "wmctrl shim (WaylandX): -l [-p] [-G] [-x] | -a|-c|-r WIN [-e g,x,y,w,h] [-b add|remove|toggle,PROP] [-t N] | -s N | -d | -m [-i] [-F]"; exit 0 ;;
+	*) real "$@" ;;
+	esac
+done
+
+host=$(uname -n)
+
+if [ $wminfo -eq 1 ]; then
+	printf 'Name: WaylandX\nClass: N/A\nPID: N/A\nWindow manager'"'"'s "showing the desktop" mode: OFF\n'
+	exit 0
+fi
+
+if [ $desktops -eq 1 ]; then
+	cur=$($CTL status | sed -n 's/.*"workspace":\([0-9]*\).*/\1/p')
+	i=1
+	while [ $i -le 9 ]; do
+		mark="-"
+		[ "$i" = "$cur" ] && mark="*"
+		printf '%d  %s DG: N/A  VP: 0,0  WA: N/A  %d\n' $((i - 1)) "$mark" "$i"
+		i=$((i + 1))
+	done
+	exit 0
+fi
+
+if [ -n "$switch" ]; then
+	$CTL workspace $((switch + 1)) >/dev/null
+	exit $?
+fi
+
+# resolve WIN -> WaylandX id (":ACTIVE:" means focused)
+resolve() {
+	t=$1
+	if [ "$t" = ":ACTIVE:" ]; then
+		$CTL focused --plain
+		return
+	fi
+	if [ $by_id -eq 1 ]; then
+		printf '%d\n' "$t"
+		return
+	fi
+	$CTL list --plain | awk -F '\t' -v p="$t" -v ex="$exact" '
+		{ if ((ex == 1 && $9 == p) || (ex == 0 && index(tolower($9), tolower(p)) > 0)) { print $1; exit } }'
+}
+
+if [ $list -eq 1 ]; then
+	$CTL list --plain | while IFS="$(printf '\t')" read -r id ws wpid app x y w h title; do
+		line=$(printf '0x%08x %2d' "$id" $((ws - 1)))
+		[ $pid -eq 1 ] && line=$(printf '%s %-6s' "$line" "$wpid")
+		[ $geom -eq 1 ] && line=$(printf '%s %-4s %-4s %-4s %-4s' "$line" "$x" "$y" "$w" "$h")
+		[ $class -eq 1 ] && line=$(printf '%s %-20s' "$line" "$app")
+		printf '%s %s %s\n' "$line" "$host" "$title"
+	done
+	exit 0
+fi
+
+[ -n "$target" ] || real "$@"
+id=$(resolve "$target")
+[ -n "$id" ] || { echo "wmctrl: window '$target' not found" >&2; exit 1; }
+
+case "$action" in
+activate) $CTL focus "$id" >/dev/null; exit $? ;;
+close) $CTL close -w "$id" >/dev/null; exit $? ;;
+esac
+
+if [ -n "$ewmh" ]; then
+	# g,x,y,w,h with -1 meaning "keep"
+	cur=$($CTL info "$id" --plain)
+	cx=$(echo "$cur" | cut -f5); cy=$(echo "$cur" | cut -f6)
+	cw=$(echo "$cur" | cut -f7); ch=$(echo "$cur" | cut -f8)
+	x=$(echo "$ewmh" | cut -d, -f2); y=$(echo "$ewmh" | cut -d, -f3)
+	w=$(echo "$ewmh" | cut -d, -f4); h=$(echo "$ewmh" | cut -d, -f5)
+	[ "$x" = "-1" ] && x=$cx
+	[ "$y" = "-1" ] && y=$cy
+	[ "$w" = "-1" ] && w=$cw
+	[ "$h" = "-1" ] && h=$ch
+	$CTL geometry -w "$id" "$x" "$y" "$w" "$h" >/dev/null || exit 1
+fi
+
+if [ -n "$state" ]; then
+	op=$(echo "$state" | cut -d, -f1)
+	sw=on
+	case "$op" in remove) sw=off ;; toggle) sw=toggle ;; esac
+	max_done=0
+	for prop in $(echo "$state" | cut -d, -f2- | tr ',' ' '); do
+		# maximized_vert,maximized_horz is one state here; apply it once
+		case "$prop" in maximized_*) [ $max_done -eq 1 ] && continue; max_done=1 ;; esac
+		case "$prop" in
+		above) $CTL above "$sw" -w "$id" ;;
+		below) $CTL below "$sw" -w "$id" ;;
+		sticky) $CTL sticky "$sw" -w "$id" ;;
+		fullscreen) $CTL fullscreen "$sw" -w "$id" ;;
+		maximized_vert|maximized_horz) $CTL maximize "$sw" -w "$id" ;;
+		hidden) $CTL minimize "$sw" -w "$id" ;;
+		*) echo "wmctrl: unsupported property $prop" >&2 ;;
+		esac >/dev/null
+	done
+fi
+
+if [ -n "$desk" ]; then
+	$CTL move_to_workspace -w "$id" $((desk + 1)) >/dev/null
+fi
+exit 0

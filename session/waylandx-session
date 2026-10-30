@@ -1,0 +1,30 @@
+#!/bin/sh
+# Login session wrapper for WaylandX (used by waylandx.desktop in the display manager).
+set -eu
+
+export XDG_CURRENT_DESKTOP=WaylandX
+export XDG_SESSION_DESKTOP=WaylandX
+export XDG_SESSION_TYPE=wayland
+export MOZ_ENABLE_WAYLAND=1
+export QT_QPA_PLATFORM="wayland;xcb"
+export SDL_VIDEODRIVER="wayland,x11"
+export _JAVA_AWT_WM_NONREPARENTING=1
+
+prefix=$(cd "$(dirname "$0")/.." && pwd)
+# display managers start sessions with a minimal PATH; make our tools findable
+export PATH="$prefix/bin:$PATH"
+if [ -d "$prefix/share/waylandx/shims" ]; then
+	export WAYLANDX_SHIMS="$prefix/share/waylandx/shims"
+fi
+
+# make sure portals (screen sharing via xdg-desktop-portal-wlr) see our session;
+# skipped when started inside another desktop so we don't hijack its environment
+cmd='true'
+if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ]; then
+	cmd='dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP WAYLANDX_SOCK; systemctl --user restart xdg-desktop-portal xdg-desktop-portal-wlr 2>/dev/null || true'
+fi
+
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-run-session >/dev/null 2>&1; then
+	exec dbus-run-session -- waylandx -s "$cmd" "$@"
+fi
+exec waylandx -s "$cmd" "$@"

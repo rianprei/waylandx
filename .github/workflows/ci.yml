@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitize: [none, address]
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git meson ninja pkgconf \
+            wlroots0.20 wayland wayland-protocols libxkbcommon libinput pixman \
+            libxcb xcb-util-wm cairo pango xorg-xwayland \
+            xclip wl-clipboard waypipe file ttf-dejavu
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: |
+          if [ "${{ matrix.sanitize }}" = none ]; then
+            meson setup build --werror
+          else
+            meson setup build -Db_sanitize=address,undefined -Dbuildtype=debug
+          fi
+      - name: Build
+        run: ninja -C build
+      - name: Test (unit + headless end-to-end)
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          export XDG_RUNTIME_DIR=/tmp/xdg-runtime
+          mkdir -p -m 0700 "$XDG_RUNTIME_DIR"
+          mkdir -p -m 1777 /tmp/.X11-unix
+          meson test -C build --print-errorlogs
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-${{ matrix.sanitize }}
+          path: |
+            build/meson-logs/
+            /tmp/waylandx-test.*/

@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="waylandx_unstable_v1">
+  <copyright>
+    Copyright 2026 WaylandX authors. MIT license.
+  </copyright>
+
+  <description summary="X11-style window powers for Wayland clients">
+    Gives Wayland toplevels what X11 windows always had: choosing their own
+    position, stacking layer, stickiness and taskbar visibility. WaylandX
+    runs in an open (X11-like) trust model, so any client may use it.
+  </description>
+
+  <interface name="wx_manager_v1" version="1">
+    <request name="destroy" type="destructor"/>
+
+    <request name="get_toplevel_control">
+      <description summary="get the control object for an xdg_toplevel">
+        Only one control object may exist per toplevel at a time.
+      </description>
+      <arg name="id" type="new_id" interface="wx_toplevel_control_v1"/>
+      <arg name="toplevel" type="object" interface="xdg_toplevel"/>
+    </request>
+
+    <enum name="error">
+      <entry name="already_controlled" value="0"/>
+    </enum>
+  </interface>
+
+  <interface name="wx_toplevel_control_v1" version="1">
+    <request name="destroy" type="destructor"/>
+
+    <request name="set_position">
+      <description summary="move the window, in global layout coordinates">
+        Coordinates are of the window content (excluding server-side
+        decorations). Applies immediately if mapped, otherwise at map.
+      </description>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+    </request>
+
+    <request name="set_size">
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </request>
+
+    <enum name="layer">
+      <entry name="below" value="0"/>
+      <entry name="normal" value="1"/>
+      <entry name="above" value="2"/>
+    </enum>
+
+    <request name="set_layer">
+      <arg name="layer" type="uint" enum="layer"/>
+    </request>
+
+    <request name="set_sticky">
+      <arg name="sticky" type="uint" summary="0 or 1"/>
+    </request>
+
+    <request name="set_skip_taskbar">
+      <arg name="skip" type="uint" summary="0 or 1"/>
+    </request>
+
+    <event name="position">
+      <description summary="current content position in layout coordinates"/>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+    </event>
+  </interface>
+</protocol>

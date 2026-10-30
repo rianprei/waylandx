@@ -1,0 +1,262 @@
+#!/bin/sh
+# xdotool shim for WaylandX: common subcommands work on Wayland *and* X11
+# windows through waylandxctl. Anything else falls through to the real xdotool.
+# Window ids printed/accepted here are WaylandX ids (see `waylandxctl list`).
+set -u
+
+CTL=${WAYLANDXCTL:-waylandxctl}
+
+real() {
+	# find the real xdotool further down PATH (skip ourselves)
+	self_dir=$(cd "$(dirname "$0")" && pwd)
+	old_ifs=$IFS
+	IFS=:
+	for d in $PATH; do
+		[ "$d" = "$self_dir" ] && continue
+		if [ -x "$d/xdotool" ]; then
+			IFS=$old_ifs
+			exec "$d/xdotool" "$@"
+		fi
+	done
+	IFS=$old_ifs
+	echo "xdotool: real xdotool not found for: $*" >&2
+	exit 1
+}
+
+[ -n "${WAYLANDX_SOCK:-}" ] || real "$@"
+[ $# -gt 0 ] || real "$@"
+
+# window stack produced by `search` / `getactivewindow` for chained commands
+STACK=""
+
+win_arg() {
+	# $1 = explicit window arg or empty -> first of stack -> focused
+	case "${1:-}" in
+	""|%1|%@) if [ -n "$STACK" ]; then echo "$STACK" | head -n1; else $CTL focused --plain; fi ;;
+	*) echo "$1" ;;
+	esac
+}
+
+is_num() { case "${1:-}" in ''|*[!0-9-]*) return 1 ;; *) return 0 ;; esac; }
+
+run() {
+	cmd=$1
+	shift
+	case "$cmd" in
+	type)
+		while [ $# -gt 0 ]; do
+			case "$1" in
+			--delay|--window|--terminator) shift 2 ;;
+			--clearmodifiers|--args) shift ;;
+			--) shift; break ;;
+			-*) shift ;;
+			*) break ;;
+			esac
+		done
+		$CTL type "$*" >/dev/null
+		;;
+	key|keydown|keyup)
+		while [ $# -gt 0 ]; do
+			case "$1" in
+			--delay|--window|--repeat|--repeat-delay) shift 2 ;;
+			--clearmodifiers) shift ;;
+			*) break ;;
+			esac
+		done
+		$CTL "$cmd" "$@" >/dev/null
+		;;
+	mousemove)
+		while [ $# -gt 0 ]; do
+			case "$1" in
+			--window|--screen) shift 2 ;;
+			--sync|--clearmodifiers|--polar) shift ;;
+			--) shift; break ;;
+			*) break ;;
+			esac
+		done
+		$CTL mousemove "$1" "$2" >/dev/null
+		;;
+	mousemove_relative)
+		while [ $# -gt 0 ]; do
+			case "$1" in
+			--sync|--clearmodifiers|--polar) shift ;;
+			--) shift; break ;;
+			*) break ;;
+			esac
+		done
+		$CTL mousemove_rel "$1" "$2" >/dev/null
+		;;
+	click)
+		repeat=1
+		while [ $# -gt 0 ]; do
+			case "$1" in
+			--repeat) repeat=$2; shift 2 ;;
+			--delay|--window) shift 2 ;;
+			--clearmodifiers) shift ;;
+			*) break ;;
+			esac
+		done
+		$CTL click "${1:-1}" "$repeat" >/dev/null
+		;;
+	mousedown|mouseup)
+		while [ $# -gt 0 ]; do
+			case "$1" in --window) shift 2 ;; --clearmodifiers) shift ;; *) break ;; esac
+		done
+		$CTL "$cmd" "${1:-1}" >/dev/null
+		;;
+	getactivewindow)
+		STACK=$($CTL focused --plain)
+		[ "$CHAINED" -eq 0 ] && echo "$STACK"
+		;;
+	getmouselocation)
+		line=$($CTL cursor --plain)
+		x=$(echo "$line" | cut -f1); y=$(echo "$line" | cut -f2); w=$(echo "$line" | cut -f3)
+		if [ "${1:-}" = "--shell" ]; then
+			printf 'X=%s\nY=%s\nSCREEN=0\nWINDOW=%s\n' "$x" "$y" "$w"
+		else
+			echo "x:$x y:$y screen:0 window:$w"
+		fi
+		;;
+	search)
+		field=title
+		only_visible=0
+		limit=0
+		while [ $# -gt 0 ]; do
+			case "$1" in
+			--name|--title) field=title; shift ;;
+			--class|--classname) field=app; shift ;;
+			--pid) field=pid; shift ;;
+			--onlyvisible) only_visible=1; shift ;;
+			--limit) limit=$2; shift 2 ;;
+			--desktop|--screen|--maxdepth) shift 2 ;;
+			--sync|--all|--any) shift ;;
+			*) break ;;
+			esac
+		done
+		pat=${1:-}
+		# list --plain: id ws pid app x y w h title
+		STACK=$($CTL list --plain | awk -F '\t' -v f="$field" -v p="$pat" -v lim="$limit" '
+			BEGIN { IGNORECASE = 1; n = 0 }
+			{
+				v = (f == "title") ? $9 : (f == "app") ? $4 : $3
+				ok = (f == "pid") ? (v == p) : (tolower(v) ~ tolower(p))
+				if (ok && (lim == 0 || n < lim)) { print $1; n++ }
+			}')
+		[ -n "$STACK" ] || return 1
+		[ "$CHAINED" -eq 0 ] && echo "$STACK"
+		_=$only_visible
+		;;
+	windowactivate|windowfocus|windowraise)
+		[ "${1:-}" = "--sync" ] && shift
+		w=$(win_arg "${1:-}"); [ $# -gt 0 ] && shift
+		$CTL focus "$w" >/dev/null
+		;;
+	windowmove)
+		while [ $# -gt 0 ]; do case "$1" in --sync|--relative) shift ;; *) break ;; esac; done
+		if [ $# -ge 3 ]; then w=$(win_arg "$1"); shift; else w=$(win_arg ""); fi
+		$CTL move -w "$w" "$1" "$2" >/dev/null
+		;;
+	windowsize)
+		while [ $# -gt 0 ]; do case "$1" in --sync|--usehints) shift ;; *) break ;; esac; done
+		if [ $# -ge 3 ]; then w=$(win_arg "$1"); shift; else w=$(win_arg ""); fi
+		$CTL resize -w "$w" "$1" "$2" >/dev/null
+		;;
+	windowclose|windowquit)
+		w=$(win_arg "${1:-}")
+		$CTL close -w "$w" >/dev/null
+		;;
+	windowkill)
+		w=$(win_arg "${1:-}")
+		$CTL kill -w "$w" >/dev/null
+		;;
+	windowminimize)
+		[ "${1:-}" = "--sync" ] && shift
+		w=$(win_arg "${1:-}")
+		$CTL minimize on -w "$w" >/dev/null
+		;;
+	windowmap)
+		w=$(win_arg "${1:-}")
+		$CTL minimize off -w "$w" >/dev/null
+		;;
+	getwindowname)
+		w=$(win_arg "${1:-}")
+		$CTL info "$w" --plain | cut -f9
+		;;
+	getwindowpid)
+		w=$(win_arg "${1:-}")
+		$CTL info "$w" --plain | cut -f3
+		;;
+	getwindowclassname)
+		w=$(win_arg "${1:-}")
+		$CTL info "$w" --plain | cut -f4
+		;;
+	getwindowgeometry)
+		shell=0
+		[ "${1:-}" = "--shell" ] && { shell=1; shift; }
+		w=$(win_arg "${1:-}")
+		line=$($CTL info "$w" --plain)
+		x=$(echo "$line" | cut -f5); y=$(echo "$line" | cut -f6)
+		ww=$(echo "$line" | cut -f7); hh=$(echo "$line" | cut -f8)
+		if [ $shell -eq 1 ]; then
+			printf 'WINDOW=%s\nX=%s\nY=%s\nWIDTH=%s\nHEIGHT=%s\nSCREEN=0\n' "$w" "$x" "$y" "$ww" "$hh"
+		else
+			printf 'Window %s\n  Position: %s,%s (screen: 0)\n  Geometry: %sx%s\n' "$w" "$x" "$y" "$ww" "$hh"
+		fi
+		;;
+	get_desktop)
+		$CTL status | sed -n 's/.*"workspace":\([0-9]*\).*/\1/p' | awk '{print $1 - 1}'
+		;;
+	set_desktop)
+		$CTL workspace $(( $1 + 1 )) >/dev/null
+		;;
+	get_num_desktops)
+		echo 9
+		;;
+	set_desktop_for_window)
+		if [ $# -ge 2 ]; then w=$(win_arg "$1"); shift; else w=$(win_arg ""); fi
+		$CTL move_to_workspace -w "$w" $(( $1 + 1 )) >/dev/null
+		;;
+	get_desktop_for_window)
+		w=$(win_arg "${1:-}")
+		$CTL info "$w" --plain | cut -f2 | awk '{print $1 - 1}'
+		;;
+	*)
+		real "$cmd" "$@"
+		;;
+	esac
+}
+
+# Chains like `xdotool search --name foo windowactivate` are split at known verbs.
+VERBS=" type key keydown keyup mousemove mousemove_relative click mousedown mouseup getactivewindow getmouselocation search windowactivate windowfocus windowraise windowmove windowsize windowclose windowquit windowkill windowminimize windowmap getwindowname getwindowpid getwindowclassname getwindowgeometry get_desktop set_desktop get_num_desktops set_desktop_for_window get_desktop_for_window "
+
+is_verb() { case "$VERBS" in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+quote() { printf "'%s' " "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+is_verb "$1" || real "$@"
+
+CHAINED=0
+status=0
+while [ $# -gt 0 ]; do
+	cmd=$1
+	shift
+	args=""
+	if [ "$cmd" = search ]; then
+		# options, then exactly one pattern (which may look like a verb)
+		while [ $# -gt 0 ]; do
+			case "$1" in
+			--limit|--desktop|--screen|--maxdepth) args="$args$(quote "$1")$(quote "$2")"; shift 2 ;;
+			--*) args="$args$(quote "$1")"; shift ;;
+			*) args="$args$(quote "$1")"; shift; break ;;
+			esac
+		done
+	else
+		while [ $# -gt 0 ] && ! is_verb "$1"; do
+			args="$args$(quote "$1")"
+			shift
+		done
+	fi
+	CHAINED=0
+	[ $# -gt 0 ] && CHAINED=1
+	eval "run $cmd $args" || { status=$?; break; }
+done
+exit $status

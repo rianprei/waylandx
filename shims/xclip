@@ -1,0 +1,69 @@
+#!/bin/sh
+# xclip shim for WaylandX. wlroots only lets X11 clients touch the clipboard
+# while an X11 window has focus; scripts run from Wayland terminals would
+# fail. Inside WaylandX we serve them through wl-clipboard (data-control),
+# which works from anywhere, like X11 always did.
+set -u
+
+real() {
+	self_dir=$(cd "$(dirname "$0")" && pwd)
+	old_ifs=$IFS
+	IFS=:
+	for d in $PATH; do
+		[ "$d" = "$self_dir" ] && continue
+		if [ -x "$d/xclip" ]; then
+			IFS=$old_ifs
+			exec "$d/xclip" "$@"
+		fi
+	done
+	IFS=$old_ifs
+	echo "xclip: real xclip not found" >&2
+	exit 1
+}
+
+if [ -z "${WAYLANDX_SOCK:-}" ] || ! command -v wl-copy >/dev/null 2>&1; then
+	real "$@"
+fi
+
+mode=in sel=primary target="" rmnl=0 files=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-i|-in) mode=in ;;
+	-o|-out) mode=out ;;
+	-selection|-sel|-se) sel=$2; shift ;;
+	-t|-target) target=$2; shift ;;
+	-rmlastnl|-r) rmnl=1 ;;
+	-l|-loops|-d|-display|-wait) shift ;;
+	-f|-filter|-quiet|-silent|-verbose|-noutf8|-sensitive|-q|-v) ;;
+	-h|-help|-version) real "$1" ;;
+	-*) real "$@" ;;
+	*) files="$files $1" ;;
+	esac
+	shift
+done
+
+case "$sel" in
+c*) flag="" ;;
+p*) flag="--primary" ;;
+*) real -selection "$sel" ;; # secondary has no Wayland equivalent
+esac
+
+if [ "$mode" = out ]; then
+	if [ "$target" = TARGETS ]; then
+		exec wl-paste $flag --list-types
+	fi
+	exec wl-paste $flag -n ${target:+--type "$target"}
+fi
+
+if [ -n "$files" ]; then
+	# shellcheck disable=SC2086
+	data=$(cat $files; printf x)
+else
+	data=$(cat; printf x)
+fi
+data=${data%x}
+if [ $rmnl -eq 1 ]; then
+	data=${data%
+}
+fi
+printf '%s' "$data" | wl-copy $flag ${target:+--type "$target"}

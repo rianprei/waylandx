@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=WaylandX
+Comment=Wayland and X11 fused: one display server, both protocols, X11 freedoms
+Exec=waylandx-session
+Type=Application
+DesktopNames=WaylandX

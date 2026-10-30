@@ -1,0 +1,26 @@
+#!/bin/sh
+# waylandx-remote: run a program on another machine and show its windows here,
+# like `ssh -X` but for Wayland and X11 apps alike (via waypipe).
+#
+#   waylandx-remote [ssh options] user@host command [args...]
+#   waylandx-remote --x11 user@host xterm      # plain ssh -X through our Xwayland
+set -eu
+
+if [ $# -lt 2 ]; then
+	echo "usage: waylandx-remote [--x11] [ssh options] user@host command [args...]" >&2
+	exit 1
+fi
+
+if [ "$1" = "--x11" ]; then
+	shift
+	exec ssh -X "$@"
+fi
+
+if ! command -v waypipe >/dev/null 2>&1; then
+	echo "waylandx-remote: waypipe is not installed (pacman -S waypipe); falling back to ssh -X" >&2
+	exec ssh -X "$@"
+fi
+
+# waypipe forwards Wayland; on the remote side X11-only apps can still use
+# Xwayland there, or pass --x11 to forward them through ssh -X instead.
+exec waypipe ${WAYLANDX_REMOTE_WAYPIPE_OPTS:---compress=lz4} ssh "$@"
