@@ -32,9 +32,10 @@ Written in C11 on top of wlroots 0.20. X11 apps run through a rootless Xwayland 
 | Input automation (xdotool) | `waylandxctl type/key/click/mousemove`, open virtual keyboard/pointer, `xdotool` shim |
 | Introspection and control (wmctrl/xprop) | `waylandxctl list/info/move/close…`, `wmctrl` shim, foreign-toplevel |
 | Global hotkeys for any program | `waylandxctl bind COMBO CMD` |
-| Clipboard reachable from anywhere | data-control (wl-clipboard) + `xclip`/`xsel` shims |
+| Clipboard reachable from anywhere | background X11 apps can read it; data-control (wl-clipboard); `xclip`/`xsel` shims |
 | Remote app, local window (`ssh -X`) | `waylandx-remote host app` (waypipe), `ssh -X` through Xwayland |
 | Classic WM: floating, title bars, Mod+drag | server-side decorations, Mod+drag, snapping; optional tiling |
+| Laptop lid / docking | lid closes → built-in panel off when an external monitor is attached |
 | Open policy | any local client may capture and inject; only the IPC socket is restricted to your user (0600) |
 
 ## Build and test
@@ -159,6 +160,7 @@ src/inject.c      keyboard/mouse injection (keymap generated on the fly)
 src/capture.c     screenshots
 src/wxproto.c     waylandx-unstable-v1
 src/protocols.c   the remaining Wayland protocols
+src/x11clip.c     X11 clipboard reads without focus
 src/lock.c        ext-session-lock
 panel/            waylandx-panel (bars + launcher)
 ctl/              waylandxctl
@@ -170,10 +172,11 @@ tests/            unit tests, Wayland/X11/IME probes, headless end-to-end suites
 ## Known limitations
 
 - **X11 apps on monitors with scale > 1** are upscaled (blurry); wlroots 0.20 has no Xwayland scaling API.
-- **Unfocused X11 clipboard access:** wlroots only lets X11 clients read/write the clipboard while an X11
-  window has focus. Focused X11 apps work normally and scripts use the shims; a background X11 clipboard
-  manager would need a wlroots patch.
-- **Tablet pads** (buttons/rings/strips on the tablet itself) and laptop lid switches are not routed yet.
+- **An unfocused X11 app taking clipboard ownership** (e.g. the real `xclip -i` run from a Wayland
+  terminal) is ignored by wlroots; use the `xclip`/`xsel` shims for that. Reading the clipboard from
+  background X11 apps works, and copying from a focused X11 app works as usual.
+- **Tablet pads** pair with the most recently connected tablet (fine for one tablet; several tablets
+  at once are not distinguished).
 - **Not tested on real hardware so far:** TTY/DRM session, VRR and tearing on a physical monitor, physical
   multi-monitor, touchscreens and drawing tablets. The test suites run headless and nested; touch and tablet
   code paths are compiled but have not been exercised by a real device.

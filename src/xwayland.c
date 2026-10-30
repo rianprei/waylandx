@@ -346,6 +346,7 @@ void xwayland_init(struct wx_server *server) {
 	}
 	server->new_xwayland_surface.notify = new_xsurface;
 	wl_signal_add(&server->xwayland->events.new_surface, &server->new_xwayland_surface);
+	x11clip_init(server);
 	server->xwayland_ready.notify = xwayland_ready;
 	wl_signal_add(&server->xwayland->events.ready, &server->xwayland_ready);
 	setenv("DISPLAY", server->xwayland->display_name, 1);

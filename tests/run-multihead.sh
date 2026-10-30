@@ -7,7 +7,7 @@ export WX_BUILD
 # shellcheck source=tests/lib.sh
 . "$(dirname "$0")/lib.sh"
 
-printf '[general]\nmod = super\nterminal = true\n' > "$T/config.ini"
+printf '[general]\nmod = super\nterminal = true\ninternal_output = HEADLESS-1\n' > "$T/config.ini"
 wx_start 2
 
 info() { "$CTL" info "$1"; }
@@ -53,8 +53,26 @@ check "$O2 untouched" bash -c "'$CTL' status -o $O2 | grep -q '\"tiling\":false'
 
 echo "== panel: one bar per monitor"
 spawn "$BUILD/waylandx-panel" > "$T/panel.txt" 2>&1
+PANEL_PID=${PIDS[-1]}
 wait_for 5 '[ "$("$CTL" outputs | grep -o "\"usable\":{\"x\":[0-9]*,\"y\":28" | wc -l)" = 2 ]'
 check "both monitors reserve 28px for their bar" \
+	test "$("$CTL" outputs | grep -o '"usable":{"x":[0-9]*,"y":28' | wc -l)" = 2
+
+echo "== laptop lid (HEADLESS-1 plays the built-in panel)"
+"$CTL" move -w "$L" 200 200 >/dev/null
+"$CTL" lid closed >/dev/null
+wait_for 3 '[ "$("$CTL" outputs --plain | wc -l)" = 1 ] || ! "$CTL" outputs | grep -q "\"name\":\"HEADLESS-1\".*\"enabled\":true"'
+check "closing the lid turns the internal panel off" \
+	bash -c "! '$CTL' outputs | grep -o '{\"name\":\"HEADLESS-1\"[^}]*' | grep -q '\"enabled\":true'"
+check "windows from the internal panel move to the external one" has "$L" '"output":"HEADLESS-2"'
+check "...and stay visible" has "$L" '"visible":true'
+"$CTL" lid open >/dev/null
+sleep 0.5
+check "opening the lid brings the panel back" \
+	bash -c "'$CTL' outputs | grep -o '{\"name\":\"HEADLESS-1\"[^}]*' | grep -q '\"enabled\":true'"
+wait_for 3 '[ "$("$CTL" outputs | grep -o "\"usable\":{\"x\":[0-9]*,\"y\":28" | wc -l)" = 2 ]'
+check "panel survived the monitor going away and back" kill -0 "$PANEL_PID"
+check "...and put a bar on the returning monitor" \
 	test "$("$CTL" outputs | grep -o '"usable":{"x":[0-9]*,"y":28' | wc -l)" = 2
 
 echo "== screenshot across both monitors"

@@ -1,5 +1,5 @@
 project('waylandx', 'c',
-  version: '0.1.0',
+  version: '0.2.0',
   license: 'MIT',
   meson_version: '>=0.60.0',
   default_options: ['c_std=c11', 'warning_level=2', 'werror=false', 'buildtype=debugoptimized'])
@@ -59,7 +59,7 @@ server_srcs = files(
   'src/xwayland.c', 'src/layer.c', 'src/view.c', 'src/deco.c', 'src/layout.c',
   'src/workspace.c', 'src/config.c', 'src/ipc.c', 'src/ipc_cmd.c',
   'src/inject.c', 'src/capture.c', 'src/wxproto.c', 'src/rules.c', 'src/json.c',
-  'src/protocols.c', 'src/lock.c', 'src/ime.c')
+  'src/protocols.c', 'src/lock.c', 'src/ime.c', 'src/x11clip.c')
 
 executable('waylandx', server_srcs,
   server_proto['xdg-shell'], server_proto['wlr-layer-shell-unstable-v1'],

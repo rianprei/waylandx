@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.2.0
+
+- **Clipboard, X11-style:** X11 clients can read the clipboard and primary selection even while
+  a Wayland window has focus (wlroots refuses this by default). Background X11 clipboard managers
+  and plain `xclip -o` work again.
+- **Tablet pads:** buttons, rings and strips on drawing tablets are delivered through tablet-v2,
+  following keyboard focus.
+- **Laptop lid:** closing the lid with an external monitor attached turns the built-in panel off
+  and moves its windows; opening it brings the panel back. Configurable with `lid_close` and
+  `internal_output`; `waylandxctl lid open|closed` triggers the same path (docking scripts).
+- **Panel** survives monitors disappearing and coming back (verified through the lid path).
+
 ## v0.1.0 — first release
 
 One display server that speaks Wayland and X11 at the same time.

@@ -157,6 +157,19 @@ if command -v wl-copy >/dev/null && [ -x /usr/bin/xclip ]; then
 	printf 'native-x11-456' | timeout 3 /usr/bin/xclip -i -selection clipboard -loops 1 &
 	sleep 0.8
 	check "focused X11 app -> Wayland (real xclip)" test "$(timeout 3 wl-paste -n 2>/dev/null)" = "native-x11-456"
+	# X11-style: background X11 clients read the clipboard with a Wayland window focused
+	"$CTL" focus "$B" >/dev/null
+	sleep 0.3
+	wl-copy "background-read-789"
+	sleep 0.5
+	check "unfocused X11 client reads the Wayland clipboard (real xclip)" \
+		test "$(timeout 3 /usr/bin/xclip -o -selection clipboard 2>/dev/null)" = "background-read-789"
+	check "...TARGETS lists text types" \
+		bash -c "timeout 3 /usr/bin/xclip -o -selection clipboard -t TARGETS | grep -q UTF8_STRING"
+	wl-copy --primary "primary-sel-321"
+	sleep 0.5
+	check "...and the primary selection" \
+		test "$(timeout 3 /usr/bin/xclip -o -selection primary 2>/dev/null)" = "primary-sel-321"
 else
 	bad "clipboard test skipped: wl-clipboard/xclip missing"
 fi

@@ -47,6 +47,7 @@ void config_defaults(struct wx_config *c) {
 	c->xwayland = true;
 	c->snap = true;
 	c->snap_threshold = 12;
+	c->lid_disable_internal = true;
 	c->cursor_size = 24;
 	c->repeat_rate = 25;
 	c->repeat_delay = 600;
@@ -63,6 +64,7 @@ void config_free(struct wx_config *c) {
 	free(c->font);
 	free(c->cursor_theme);
 	free(c->screenshot_dir);
+	free(c->internal_output);
 	free(c->kb_layout);
 	free(c->kb_variant);
 	free(c->kb_options);
@@ -225,6 +227,11 @@ static bool parse_general(struct parse_ctx *p, const char *k, const char *v) {
 		WANT(config_parse_bool(v, &c->xwayland), "boolean");
 	} else if (!strcmp(k, "snap")) {
 		WANT(config_parse_bool(v, &c->snap), "boolean");
+	} else if (!strcmp(k, "lid_close")) {
+		WANT(!strcmp(v, "disable") || !strcmp(v, "none"), "lid_close (disable|none)");
+		c->lid_disable_internal = !strcmp(v, "disable");
+	} else if (!strcmp(k, "internal_output")) {
+		set_str(&c->internal_output, v);
 	} else if (!strcmp(k, "snap_threshold")) {
 		WANT(parse_int(v, &c->snap_threshold) && c->snap_threshold >= 0, "integer");
 	} else if (!strcmp(k, "cursor_theme")) {

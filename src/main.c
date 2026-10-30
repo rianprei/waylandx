@@ -128,7 +128,7 @@ static void setup_shims_path(void) {
 	X(cursor_pinch_update) X(cursor_pinch_end) X(cursor_hold_begin) X(cursor_hold_end) \
 	X(cursor_touch_down) X(cursor_touch_up) X(cursor_touch_motion) X(cursor_touch_cancel) \
 	X(cursor_touch_frame) X(cursor_tool_proximity) X(cursor_tool_axis) X(cursor_tool_tip) \
-	X(cursor_tool_button) X(new_text_input) X(new_input_method) X(kb_focus_change) \
+	X(cursor_tool_button) X(kb_focus_pads) X(new_text_input) X(new_input_method) X(kb_focus_change) \
 	X(im_commit) X(im_grab_keyboard) X(im_new_popup) X(im_destroy) X(im_grab_destroy) \
 	X(request_cursor) X(request_set_selection) X(request_set_primary_selection) \
 	X(request_start_drag) X(start_drag) X(drag_destroy) X(ext_ws_commit) \

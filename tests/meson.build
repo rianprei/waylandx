@@ -1,6 +1,6 @@
 test_config = executable('test_config', 'test_config.c', '../src/config.c',
   include_directories: include_directories('../src'))
-test('config', test_config)
+test('config', test_config, args: [meson.project_source_root() / 'config/default.ini'])
 
 test_json = executable('test_json', 'test_json.c', '../src/json.c',
   include_directories: include_directories('../src'))

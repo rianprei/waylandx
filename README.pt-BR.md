@@ -31,9 +31,10 @@ Construído em C11 sobre wlroots 0.20. Apps X11 rodam via Xwayland rootless, ger
 | Automação de input (xdotool) | `waylandxctl type/key/click/mousemove`, virtual-keyboard/pointer abertos, shim `xdotool` |
 | Introspecção e controle (wmctrl/xprop) | `waylandxctl list/info/move/close…`, shims `wmctrl`, foreign-toplevel |
 | Atalhos globais para qualquer programa | `waylandxctl bind COMBO CMD` |
-| Clipboard acessível de qualquer lugar | data-control (wl-clipboard) + shims `xclip`/`xsel` |
+| Clipboard acessível de qualquer lugar | apps X11 em segundo plano conseguem ler; data-control (wl-clipboard); shims `xclip`/`xsel` |
 | Rodar app remoto com janela local (ssh -X) | `waylandx-remote host app` (waypipe), `ssh -X` via Xwayland |
 | WM tradicional: flutuante, decorações, arrastar com Mod | decorações desenhadas pelo servidor, Mod+arrastar, snap; tiling opcional |
+| Tampa do notebook / dock | fechar a tampa desliga a tela interna quando há monitor externo |
 | Política aberta | qualquer cliente local pode capturar e injetar; só o socket IPC é restrito ao seu usuário (0600) |
 
 ## Compilar e testar
@@ -152,6 +153,7 @@ src/inject.c      injeção de teclado/mouse (keymap gerado na hora)
 src/capture.c     screenshots
 src/wxproto.c     protocolo waylandx-unstable-v1
 src/protocols.c   demais protocolos Wayland
+src/x11clip.c     leitura do clipboard por apps X11 sem foco
 src/lock.c        ext-session-lock
 panel/            waylandx-panel (uma barra por monitor + launcher)
 ctl/              waylandxctl
@@ -163,8 +165,8 @@ tests/            unitários, probes Wayland/X11/IME, suítes e2e sem tela
 ## Limites conhecidos
 
 - **Apps X11 em monitores com escala > 1** são ampliados (ficam borrados). O wlroots 0.20 não tem API de escala para o Xwayland.
-- **Clipboard X11 sem foco:** o wlroots só deixa um cliente X11 ler ou escrever o clipboard enquanto alguma janela X11 tem foco. Apps X11 focados funcionam normalmente e scripts usam os shims; um gerenciador de clipboard X11 em segundo plano exigiria um patch no wlroots.
-- **Botões da própria mesa digitalizadora** (pad: botões, anéis, faixas) e o sensor de tampa do notebook ainda não são tratados.
+- **Um app X11 sem foco virando dono do clipboard** (por exemplo, o `xclip -i` de verdade rodado num terminal Wayland) é ignorado pelo wlroots; para isso use os shims `xclip`/`xsel`. Ler o clipboard a partir de apps X11 em segundo plano funciona, e copiar de um app X11 focado funciona normalmente.
+- **Botões da mesa digitalizadora** se associam à última mesa conectada (funciona com uma mesa; várias mesas ao mesmo tempo não são diferenciadas).
 - **Ainda não testado em hardware real:** sessão TTY/DRM, VRR e tearing em monitor físico, multi-monitor físico, touchscreen e mesa digitalizadora. As suítes rodam sem tela e aninhadas; o código de touch e de mesa compila, mas não foi exercitado por um dispositivo real.
 
 ## Licença

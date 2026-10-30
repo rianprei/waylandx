@@ -56,6 +56,8 @@ struct wx_config {
 	bool xwayland;
 	bool snap;
 	int snap_threshold;
+	bool lid_disable_internal;  /* closing the lid turns the built-in panel off */
+	char *internal_output;      /* fnmatch glob; NULL = eDP*, LVDS*, DSI* */
 	char *cursor_theme;
 	int cursor_size;
 	char *screenshot_dir;

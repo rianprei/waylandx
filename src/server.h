@@ -58,6 +58,7 @@ struct wlr_xdg_activation_v1;
 struct wlr_cursor_shape_manager_v1;
 struct wlr_pointer_gestures_v1;
 struct wlr_tablet_manager_v2;
+struct wlr_tablet_v2_tablet;
 struct wlr_input_method_v2;
 struct wlr_input_method_keyboard_grab_v2;
 struct wlr_ext_image_copy_capture_manager_v1;
@@ -106,6 +107,7 @@ struct wx_output {
 	struct wlr_box usable; /* minus layer-shell exclusive zones */
 	struct wlr_scene_rect *lock_bg;
 	struct wlr_scene_rect *background; /* solid desktop color under layer-shell wallpapers */
+	bool lid_disabled;       /* turned off because the laptop lid closed */
 	struct wl_list captures; /* wx_capture_part.link pending on this output */
 	int workspace;           /* 1..WX_WORKSPACES shown on this output */
 	bool tiling[WX_WORKSPACES + 1];
@@ -325,6 +327,9 @@ struct wx_server {
 	struct wl_listener new_text_input, new_input_method, kb_focus_change;
 	struct wl_listener im_commit, im_grab_keyboard, im_new_popup, im_destroy, im_grab_destroy;
 	int touch_devices;
+	struct wl_list pads;     /* wx_pad.link */
+	struct wlr_tablet_v2_tablet *last_tablet;
+	struct wl_listener kb_focus_pads;
 	struct wl_listener request_cursor;
 	struct wl_listener request_set_selection;
 	struct wl_listener request_set_primary_selection;
@@ -400,6 +405,7 @@ void output_apply_config(struct wx_output *output);
 void outputs_apply_config(struct wx_server *server);
 void output_update_manager(struct wx_server *server);
 void output_update_background(struct wx_output *output);
+void output_set_enabled(struct wx_output *output, bool enabled);
 
 /* input.c */
 void input_init(struct wx_server *server);
@@ -408,6 +414,9 @@ void input_add_keyboard(struct wx_server *server, struct wlr_keyboard *kb, bool 
 void input_add_pointer(struct wx_server *server, struct wlr_input_device *device);
 void input_add_touch(struct wx_server *server, struct wlr_input_device *device);
 void input_add_tablet(struct wx_server *server, struct wlr_input_device *device);
+void input_lid(struct wx_server *server, bool closed);
+void input_add_pad(struct wx_server *server, struct wlr_input_device *device);
+void input_add_switch(struct wx_server *server, struct wlr_input_device *device);
 struct wx_node_tag *input_node_at(struct wx_server *server, double lx, double ly,
 	struct wlr_surface **surface, double *sx, double *sy);
 void input_begin_interactive(struct wx_view *view, enum wx_cursor_mode mode, uint32_t edges);
@@ -436,6 +445,9 @@ void xdg_init(struct wx_server *server);
 
 /* xwayland.c */
 void xwayland_init(struct wx_server *server);
+
+/* x11clip.c */
+void x11clip_init(struct wx_server *server);
 
 /* layer.c */
 void layer_init(struct wx_server *server);

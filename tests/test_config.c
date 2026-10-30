@@ -128,7 +128,43 @@ static void test_values(void) {
 	assert(!config_parse_bool("maybe", &b));
 }
 
-int main(void) {
+/* The shipped example must parse, with every commented option enabled too. */
+static void test_shipped_file(const char *path) {
+	struct wx_config c;
+	config_defaults(&c);
+	char *err = NULL;
+	bool ok = config_load_file(&c, path, &err);
+	if (!ok) {
+		fprintf(stderr, "%s: %s\n", path, err);
+	}
+	assert(ok);
+	FILE *f = fopen(path, "r");
+	assert(f);
+	char line[512], text[65536] = "";
+	while (fgets(line, sizeof(line), f)) {
+		/* "# key = value" lines become active; prose comments stay comments */
+		if (!strncmp(line, "# ", 2) && strchr(line, '=')) {
+			strncat(text, line + 2, sizeof(text) - strlen(text) - 1);
+		} else if (!strncmp(line, "# [", 3)) {
+			strncat(text, line + 2, sizeof(text) - strlen(text) - 1);
+		} else {
+			strncat(text, line, sizeof(text) - strlen(text) - 1);
+		}
+	}
+	fclose(f);
+	err = NULL;
+	ok = config_parse_string(&c, text, &err);
+	if (!ok) {
+		fprintf(stderr, "uncommented %s: %s\n", path, err);
+	}
+	assert(ok);
+	config_free(&c);
+}
+
+int main(int argc, char *argv[]) {
+	if (argc > 1) {
+		test_shipped_file(argv[1]);
+	}
 	test_defaults();
 	test_full();
 	test_error_keeps_previous();

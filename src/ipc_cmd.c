@@ -1037,7 +1037,7 @@ static const char *help_text =
 	"  type TEXT | key COMBO... | keydown COMBO | keyup COMBO\n"
 	"  mousemove X Y | mousemove_rel DX DY | click [BUTTON] [COUNT] | mousedown B | mouseup B\n"
 	"  scroll DX DY | screenshot [PATH] [-o OUTPUT|-w ID|-r X,Y,W,H]\n"
-	"  bind COMBO | unbind COMBO | subscribe | ping";
+	"  bind COMBO | unbind COMBO | subscribe | lid open|closed | ping";
 
 bool ipc_cmd_run(struct wx_server *server, struct wx_ipc_client *client, const char *line,
 		struct wx_buf *out) {
@@ -1159,6 +1159,14 @@ bool ipc_cmd_run(struct wx_server *server, struct wx_ipc_client *client, const c
 		cmd_bind(&c, true);
 	} else if (!strcmp(name, "unbind")) {
 		cmd_bind(&c, false);
+	} else if (!strcmp(name, "lid")) {
+		/* same path as the real lid switch; handy for docking scripts */
+		if (c.argc != 2 || (strcmp(c.argv[1], "open") && strcmp(c.argv[1], "closed"))) {
+			reply_err(out, "usage: lid open|closed");
+		} else {
+			input_lid(server, !strcmp(c.argv[1], "closed"));
+			reply_ok(out);
+		}
 	} else if (!strcmp(name, "subscribe")) {
 		if (!client) {
 			reply_err(out, "subscribe is only available over IPC");

@@ -17,6 +17,9 @@
 #include <wlr/types/wlr_relative_pointer_v1.h>
 #include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_seat.h>
+#include <wlr/types/wlr_switch.h>
+#include <wlr/types/wlr_tablet_pad.h>
+#include <fnmatch.h>
 #include <wlr/types/wlr_tablet_tool.h>
 #include <wlr/types/wlr_tablet_v2.h>
 #include <wlr/types/wlr_touch.h>
@@ -255,8 +258,13 @@ static void new_input(struct wl_listener *listener, void *data) {
 	case WLR_INPUT_DEVICE_TABLET:
 		input_add_tablet(server, device);
 		break;
+	case WLR_INPUT_DEVICE_TABLET_PAD:
+		input_add_pad(server, device);
+		break;
+	case WLR_INPUT_DEVICE_SWITCH:
+		input_add_switch(server, device);
+		break;
 	default:
-		/* shortcut: tablet pads and switches (lid) are not routed; add with hardware to test */
 		wlr_log(WLR_INFO, "input device '%s' (type %d) not handled", device->name, device->type);
 		break;
 	}
@@ -867,7 +875,167 @@ static struct wx_tool *tool_get(struct wx_server *server, struct wlr_tablet_tool
 
 void input_add_tablet(struct wx_server *server, struct wlr_input_device *device) {
 	device->data = wlr_tablet_create(server->tablet_manager, server->seat, device);
+	server->last_tablet = device->data;
 	wlr_cursor_attach_input_device(server->cursor, device);
+}
+
+/* ---------- tablet pads (buttons, rings, strips on the tablet itself) ---------- */
+
+/* shortcut: a pad is paired with the most recently added tablet, which covers
+ * the usual one-tablet setup; track attach_tablet for several tablets */
+struct wx_pad {
+	struct wl_list link;
+	struct wx_server *server;
+	struct wlr_tablet_v2_tablet_pad *v2;
+	struct wlr_surface *focus;
+	struct wl_listener button, ring, strip, destroy;
+};
+
+static void pad_focus(struct wx_pad *pad, struct wlr_surface *old, struct wlr_surface *now) {
+	struct wx_server *server = pad->server;
+	if (pad->focus && pad->focus == old) {
+		wlr_tablet_v2_tablet_pad_notify_leave(pad->v2, old);
+	}
+	pad->focus = NULL;
+	if (now && server->last_tablet && wlr_surface_accepts_tablet_v2(now, server->last_tablet)) {
+		wlr_tablet_v2_tablet_pad_notify_enter(pad->v2, server->last_tablet, now);
+		pad->focus = now;
+	}
+}
+
+static void kb_focus_pads(struct wl_listener *listener, void *data) {
+	struct wx_server *server = wl_container_of(listener, server, kb_focus_pads);
+	struct wlr_seat_keyboard_focus_change_event *e = data;
+	struct wx_pad *pad;
+	wl_list_for_each(pad, &server->pads, link) {
+		pad_focus(pad, e->old_surface, e->new_surface);
+	}
+}
+
+static void pad_button(struct wl_listener *listener, void *data) {
+	struct wx_pad *pad = wl_container_of(listener, pad, button);
+	struct wlr_tablet_pad_button_event *e = data;
+	notify_activity(pad->server);
+	wlr_tablet_v2_tablet_pad_notify_button(pad->v2, e->button, e->time_msec,
+		e->state == WLR_BUTTON_PRESSED ? ZWP_TABLET_PAD_V2_BUTTON_STATE_PRESSED :
+		ZWP_TABLET_PAD_V2_BUTTON_STATE_RELEASED);
+}
+
+static void pad_ring(struct wl_listener *listener, void *data) {
+	struct wx_pad *pad = wl_container_of(listener, pad, ring);
+	struct wlr_tablet_pad_ring_event *e = data;
+	wlr_tablet_v2_tablet_pad_notify_ring(pad->v2, e->ring, e->position,
+		e->source == WLR_TABLET_PAD_RING_SOURCE_FINGER, e->time_msec);
+}
+
+static void pad_strip(struct wl_listener *listener, void *data) {
+	struct wx_pad *pad = wl_container_of(listener, pad, strip);
+	struct wlr_tablet_pad_strip_event *e = data;
+	wlr_tablet_v2_tablet_pad_notify_strip(pad->v2, e->strip, e->position,
+		e->source == WLR_TABLET_PAD_STRIP_SOURCE_FINGER, e->time_msec);
+}
+
+static void pad_destroy(struct wl_listener *listener, void *data) {
+	struct wx_pad *pad = wl_container_of(listener, pad, destroy);
+	wl_list_remove(&pad->button.link);
+	wl_list_remove(&pad->ring.link);
+	wl_list_remove(&pad->strip.link);
+	wl_list_remove(&pad->destroy.link);
+	wl_list_remove(&pad->link);
+	free(pad);
+}
+
+void input_add_pad(struct wx_server *server, struct wlr_input_device *device) {
+	struct wlr_tablet_pad *wpad = wlr_tablet_pad_from_input_device(device);
+	struct wx_pad *pad = calloc(1, sizeof(*pad));
+	pad->server = server;
+	pad->v2 = wlr_tablet_pad_create(server->tablet_manager, server->seat, device);
+	pad->button.notify = pad_button;
+	wl_signal_add(&wpad->events.button, &pad->button);
+	pad->ring.notify = pad_ring;
+	wl_signal_add(&wpad->events.ring, &pad->ring);
+	pad->strip.notify = pad_strip;
+	wl_signal_add(&wpad->events.strip, &pad->strip);
+	pad->destroy.notify = pad_destroy;
+	wl_signal_add(&device->events.destroy, &pad->destroy);
+	wl_list_insert(&server->pads, &pad->link);
+	pad_focus(pad, NULL, server->seat->keyboard_state.focused_surface);
+}
+
+/* ---------- switches: laptop lid ---------- */
+
+static bool output_is_internal(struct wx_server *server, struct wx_output *o) {
+	const char *name = o->wlr_output->name;
+	if (server->config.internal_output) {
+		return fnmatch(server->config.internal_output, name, 0) == 0;
+	}
+	return !strncmp(name, "eDP", 3) || !strncmp(name, "LVDS", 4) || !strncmp(name, "DSI", 3);
+}
+
+/* Closing the lid with an external monitor attached turns the built-in panel
+ * off (its windows move to the remaining outputs); opening brings it back. */
+void input_lid(struct wx_server *server, bool closed) {
+	char line[64];
+	snprintf(line, sizeof(line), "{\"event\":\"lid\",\"closed\":%s}", closed ? "true" : "false");
+	ipc_broadcast_event(server, line);
+	struct wx_output *o;
+	if (!closed) {
+		wl_list_for_each(o, &server->outputs, link) {
+			if (o->lid_disabled) {
+				o->lid_disabled = false;
+				output_set_enabled(o, true);
+			}
+		}
+		return;
+	}
+	if (!server->config.lid_disable_internal) {
+		return;
+	}
+	bool external = false;
+	wl_list_for_each(o, &server->outputs, link) {
+		if (o->wlr_output->enabled && !output_is_internal(server, o)) {
+			external = true;
+		}
+	}
+	if (!external) {
+		return; /* never leave the session without a screen; logind handles suspend */
+	}
+	wl_list_for_each(o, &server->outputs, link) {
+		if (o->wlr_output->enabled && output_is_internal(server, o)) {
+			o->lid_disabled = true;
+			output_set_enabled(o, false);
+			wlr_log(WLR_INFO, "lid closed: %s off", o->wlr_output->name);
+		}
+	}
+}
+
+struct wx_switch {
+	struct wx_server *server;
+	struct wl_listener toggle, destroy;
+};
+
+static void switch_toggle(struct wl_listener *listener, void *data) {
+	struct wx_switch *sw = wl_container_of(listener, sw, toggle);
+	struct wlr_switch_toggle_event *e = data;
+	if (e->switch_type == WLR_SWITCH_TYPE_LID) {
+		input_lid(sw->server, e->switch_state == WLR_SWITCH_STATE_ON);
+	}
+}
+
+static void switch_destroy(struct wl_listener *listener, void *data) {
+	struct wx_switch *sw = wl_container_of(listener, sw, destroy);
+	wl_list_remove(&sw->toggle.link);
+	wl_list_remove(&sw->destroy.link);
+	free(sw);
+}
+
+void input_add_switch(struct wx_server *server, struct wlr_input_device *device) {
+	struct wx_switch *sw = calloc(1, sizeof(*sw));
+	sw->server = server;
+	sw->toggle.notify = switch_toggle;
+	wl_signal_add(&wlr_switch_from_input_device(device)->events.toggle, &sw->toggle);
+	sw->destroy.notify = switch_destroy;
+	wl_signal_add(&device->events.destroy, &sw->destroy);
 }
 
 /* Moves the cursor to the tool and routes focus: tablet-v2 if the surface
@@ -1026,6 +1194,8 @@ void input_init(struct wx_server *server) {
 	LISTEN(c->events.touch_cancel, cursor_touch_cancel, cursor_touch_cancel);
 	LISTEN(c->events.touch_frame, cursor_touch_frame, cursor_touch_frame);
 	server->tablet_manager = wlr_tablet_v2_create(server->display);
+	wl_list_init(&server->pads);
+	LISTEN(server->seat->keyboard_state.events.focus_change, kb_focus_pads, kb_focus_pads);
 	LISTEN(c->events.tablet_tool_proximity, cursor_tool_proximity, cursor_tool_proximity);
 	LISTEN(c->events.tablet_tool_axis, cursor_tool_axis, cursor_tool_axis);
 	LISTEN(c->events.tablet_tool_tip, cursor_tool_tip, cursor_tool_tip);

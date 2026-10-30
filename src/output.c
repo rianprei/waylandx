@@ -112,9 +112,26 @@ void output_apply_config(struct wx_output *output) {
 	wlr_xcursor_manager_load(output->server->cursor_mgr, wlr_output->scale);
 }
 
+void output_set_enabled(struct wx_output *output, bool enabled) {
+	if (enabled) {
+		output_apply_config(output);
+		return;
+	}
+	struct wlr_output_state state;
+	wlr_output_state_init(&state);
+	wlr_output_state_set_enabled(&state, false);
+	if (wlr_output_commit_state(output->wlr_output, &state)) {
+		wlr_output_layout_remove(output->server->output_layout, output->wlr_output);
+	}
+	wlr_output_state_finish(&state);
+}
+
 void outputs_apply_config(struct wx_server *server) {
 	struct wx_output *output;
 	wl_list_for_each(output, &server->outputs, link) {
+		if (output->lid_disabled) {
+			continue; /* stays off until the lid opens */
+		}
 		output_apply_config(output);
 		output_update_background(output);
 	}
