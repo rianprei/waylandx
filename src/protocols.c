@@ -200,6 +200,7 @@ void protocols_update_idle_inhibit(struct wx_server *server) {
 		}
 	}
 	wlr_idle_notifier_v1_set_inhibited(server->idle_notifier, inhibited);
+	idle_set_inhibited(server, inhibited);
 }
 
 static void idle_inhibit_recheck(void *data) {
@@ -346,8 +347,8 @@ void protocols_init(struct wx_server *server) {
 		static const enum wp_color_manager_v1_render_intent intents[] = {
 			WP_COLOR_MANAGER_V1_RENDER_INTENT_PERCEPTUAL,
 		};
+		/* no TRANSFER_FUNCTION_SRGB: deprecated, and wlroots asserts on it */
 		static const enum wp_color_manager_v1_transfer_function tfs[] = {
-			WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_SRGB,
 			WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ,
 			WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_EXT_LINEAR,
 			WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_GAMMA22,
@@ -360,7 +361,7 @@ void protocols_init(struct wx_server *server) {
 		struct wlr_color_manager_v1_options opts = {
 			.features = {.parametric = true, .set_mastering_display_primaries = true},
 			.render_intents = intents, .render_intents_len = 1,
-			.transfer_functions = tfs, .transfer_functions_len = 5,
+			.transfer_functions = tfs, .transfer_functions_len = sizeof(tfs) / sizeof(tfs[0]),
 			.primaries = prims, .primaries_len = 2,
 		};
 		wlr_color_manager_v1_create(d, 1, &opts);
@@ -376,7 +377,7 @@ void protocols_init(struct wx_server *server) {
 	server->tearing = wlr_tearing_control_manager_v1_create(d, 1);
 
 	/* shell helpers */
-	wlr_xdg_output_manager_v1_create(d, server->output_layout);
+	xwlscale_init(server);
 	server->activation = wlr_xdg_activation_v1_create(d);
 	server->activation_request.notify = activation_request;
 	wl_signal_add(&server->activation->events.request_activate, &server->activation_request);
@@ -402,7 +403,8 @@ void protocols_init(struct wx_server *server) {
 		wlr_ext_foreign_toplevel_image_capture_source_manager_v1_create(d, 1);
 	server->toplevel_capture_request.notify = toplevel_capture_request;
 	wl_signal_add(&tcap->events.new_request, &server->toplevel_capture_request);
-	wlr_scene_set_gamma_control_manager_v1(server->scene, wlr_gamma_control_manager_v1_create(d));
+	server->gamma_mgr = wlr_gamma_control_manager_v1_create(d);
+	wlr_scene_set_gamma_control_manager_v1(server->scene, server->gamma_mgr);
 	server->ftl_mgr = wlr_foreign_toplevel_manager_v1_create(d);
 	server->ext_ftl_list = wlr_ext_foreign_toplevel_list_v1_create(d, 1);
 

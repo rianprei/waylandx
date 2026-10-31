@@ -20,6 +20,10 @@ struct wx_lock_surface {
 static void lock_surface_map(struct wl_listener *listener, void *data) {
 	struct wx_lock_surface *s = wl_container_of(listener, s, map);
 	seat_focus_surface(s->server, s->ls->surface);
+	if (!s->server->lock_shown) {
+		s->server->lock_shown = true;
+		logind_lock_changed(s->server); /* a pending suspend may go on now */
+	}
 }
 
 static void lock_surface_destroy(struct wl_listener *listener, void *data) {
@@ -90,6 +94,9 @@ static void lock_unlock(struct wl_listener *listener, void *data) {
 	struct wx_server *server = wl_container_of(listener, server, lock_unlock);
 	lock_detach(server);
 	server->locked = false;
+	server->lock_shown = false;
+	idle_rearm(server);
+	logind_lock_changed(server);
 	set_lock_backgrounds(server, false);
 	wlr_log(WLR_INFO, "session unlocked");
 	seat_refocus(server);
@@ -99,8 +106,10 @@ static void lock_destroy(struct wl_listener *listener, void *data) {
 	struct wx_server *server = wl_container_of(listener, server, lock_destroy);
 	lock_detach(server);
 	if (server->locked) {
-		wlr_log(WLR_ERROR, "screen locker died without unlocking; staying locked");
+		wlr_log(WLR_ERROR, "screen locker died without unlocking; staying locked "
+			"(any key starts it again)");
 	}
+	idle_rearm(server);
 }
 
 static void new_lock(struct wl_listener *listener, void *data) {
@@ -112,6 +121,8 @@ static void new_lock(struct wl_listener *listener, void *data) {
 	}
 	server->lock = lock;
 	server->locked = true;
+	idle_rearm(server);
+	logind_lock_changed(server);
 	set_lock_backgrounds(server, true);
 	if (server->cursor_mode != WX_CURSOR_PASSTHROUGH) {
 		input_end_interactive(server);

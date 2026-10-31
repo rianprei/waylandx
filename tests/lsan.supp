@@ -1,0 +1,8 @@
+leak:libfontconfig.so
+leak:libpango-1.0.so
+leak:libpangocairo-1.0.so
+leak:libpangoft2-1.0.so
+leak:libcairo.so
+leak:libglib-2.0.so
+leak:libgobject-2.0.so
+leak:libharfbuzz.so

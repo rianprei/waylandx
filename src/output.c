@@ -157,10 +157,13 @@ static void output_frame(struct wl_listener *listener, void *data) {
 	struct wx_view *fs = fullscreen_view_on(output);
 	bool tearing = fs && (!oc || oc->allow_tearing != 0) && protocols_view_wants_tearing(fs);
 
+	struct wlr_scene_output_state_options opts = {
+		.color_transform = nightlight_transform(output->wlr_output),
+	};
 	if (tearing && wlr_scene_output_needs_frame(so)) {
 		struct wlr_output_state state;
 		wlr_output_state_init(&state);
-		if (wlr_scene_output_build_state(so, &state, NULL)) {
+		if (wlr_scene_output_build_state(so, &state, &opts)) {
 			state.tearing_page_flip = true;
 			if (!wlr_output_test_state(output->wlr_output, &state)) {
 				state.tearing_page_flip = false;
@@ -169,7 +172,7 @@ static void output_frame(struct wl_listener *listener, void *data) {
 		}
 		wlr_output_state_finish(&state);
 	} else {
-		wlr_scene_output_commit(so, NULL);
+		wlr_scene_output_commit(so, &opts);
 	}
 
 	struct timespec now;
@@ -192,6 +195,7 @@ static void output_destroy(struct wl_listener *listener, void *data) {
 	struct wx_output *output = wl_container_of(listener, output, destroy);
 	struct wx_server *server = output->server;
 	capture_output_destroy(output);
+	xwl_output_destroyed(output->wlr_output);
 	workspace_output_finish(output);
 	if (server->active_output == output) {
 		server->active_output = NULL;
@@ -252,6 +256,7 @@ static void new_output(struct wl_listener *listener, void *data) {
 		float black[4] = {0, 0, 0, 1};
 		output->lock_bg = wlr_scene_rect_create(server->lock_tree, 0, 0, black);
 	}
+	nightlight_reapply(server);
 	wlr_log(WLR_INFO, "output %s added (%s %s), scale %.2f", wlr_output->name,
 		wlr_output->make ? wlr_output->make : "?", wlr_output->model ? wlr_output->model : "?",
 		wlr_output->scale);
@@ -315,6 +320,7 @@ static void layout_change(struct wl_listener *listener, void *data) {
 		}
 	}
 	output_update_manager(server);
+	xwayland_update_scale(server);
 	layout_arrange(server);
 }
 

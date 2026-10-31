@@ -1,4 +1,5 @@
 #include <cairo.h>
+#include <math.h>
 #include <drm_fourcc.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,6 +8,8 @@
 #include <wlr/render/wlr_renderer.h>
 #include <wlr/render/wlr_texture.h>
 #include <wlr/types/wlr_output.h>
+#include <wlr/util/box.h>
+#include <wlr/util/transform.h>
 #include <wlr/util/log.h>
 #include "ipc.h"
 #include "json.h"
@@ -15,7 +18,9 @@
 /*
  * Screenshots without any portal or permission prompt (X11-style). Each
  * output involved is asked for a fresh frame; when it commits we read the
- * committed buffer back and composite it into one image in layout space.
+ * committed buffer back and composite it into one image in layout space,
+ * at the largest scale involved (HiDPI shots keep every physical pixel) and
+ * with rotation/flips undone.
  */
 
 #define CAPTURE_TIMEOUT_MS 3000
@@ -25,6 +30,7 @@ struct wx_capture {
 	struct wx_ipc_client *client;
 	char *path;
 	struct wlr_box box;
+	double scale;            /* image pixels per layout unit */
 	cairo_surface_t *img;
 	int pending;
 	bool failed;
@@ -65,8 +71,8 @@ static void capture_finish(struct wx_capture *cap, const char *error) {
 	} else {
 		buf_puts(&b, "{\"ok\":true,\"path\":");
 		buf_json_str(&b, cap->path);
-		buf_printf(&b, ",\"x\":%d,\"y\":%d,\"width\":%d,\"height\":%d}", cap->box.x, cap->box.y,
-			cap->box.width, cap->box.height);
+		buf_printf(&b, ",\"x\":%d,\"y\":%d,\"width\":%d,\"height\":%d,\"scale\":%g}",
+			cap->box.x, cap->box.y, cap->box.width, cap->box.height, cap->scale);
 		wlr_log(WLR_INFO, "screenshot saved to %s", cap->path);
 	}
 	struct wx_ipc_client *client = cap->client;
@@ -99,7 +105,17 @@ bool capture_start(struct wx_server *server, struct wx_ipc_client *client, const
 	cap->path = strdup(path);
 	cap->box = box;
 	wl_list_init(&cap->parts);
-	cap->img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, box.width, box.height);
+	cap->scale = 1.0;
+	struct wx_output *o;
+	wl_list_for_each(o, &server->outputs, link) {
+		struct wlr_box inter;
+		if (o->wlr_output->enabled && wlr_box_intersection(&inter, &o->full, &box) &&
+				o->wlr_output->scale > cap->scale) {
+			cap->scale = o->wlr_output->scale;
+		}
+	}
+	cap->img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
+		(int)ceil(box.width * cap->scale), (int)ceil(box.height * cap->scale));
 	if (cairo_surface_status(cap->img) != CAIRO_STATUS_SUCCESS) {
 		cairo_surface_destroy(cap->img);
 		free(cap->path);
@@ -107,7 +123,6 @@ bool capture_start(struct wx_server *server, struct wx_ipc_client *client, const
 		*err = strdup("cannot allocate image");
 		return false;
 	}
-	struct wx_output *o;
 	wl_list_for_each(o, &server->outputs, link) {
 		struct wlr_box inter;
 		if (!o->wlr_output->enabled || !wlr_box_intersection(&inter, &o->full, &box)) {
@@ -135,15 +150,32 @@ bool capture_start(struct wx_server *server, struct wx_ipc_client *client, const
 	return true;
 }
 
+/* Maps the output's buffer (rotated/flipped like the panel) back to layout space. */
 static void blit_output(struct wx_capture *cap, struct wx_output *o, cairo_surface_t *src) {
+	int tw, th; /* output size in pixels, upright */
+	wlr_output_transformed_resolution(o->wlr_output, &tw, &th);
+	if (tw <= 0 || th <= 0) {
+		return;
+	}
+	/* same mapping wlroots renders with: upright pixel -> buffer pixel */
+	enum wl_output_transform inv = wlr_output_transform_invert(o->wlr_output->transform);
+	struct wlr_box p0 = {0, 0, 0, 0}, px = {1, 0, 0, 0}, py = {0, 1, 0, 0}, d0, dx, dy;
+	wlr_box_transform(&d0, &p0, inv, tw, th);
+	wlr_box_transform(&dx, &px, inv, tw, th);
+	wlr_box_transform(&dy, &py, inv, tw, th);
+	cairo_matrix_t m;
+	cairo_matrix_init(&m, dx.x - d0.x, dx.y - d0.y, dy.x - d0.x, dy.y - d0.y, d0.x, d0.y);
+
 	cairo_t *cr = cairo_create(cap->img);
-	cairo_translate(cr, o->full.x - cap->box.x, o->full.y - cap->box.y);
-	double sx = (double)o->full.width / cairo_image_surface_get_width(src);
-	double sy = (double)o->full.height / cairo_image_surface_get_height(src);
-	cairo_scale(cr, sx, sy);
-	cairo_set_source_surface(cr, src, 0, 0);
-	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
-	cairo_paint(cr);
+	cairo_translate(cr, (o->full.x - cap->box.x) * cap->scale, (o->full.y - cap->box.y) * cap->scale);
+	cairo_scale(cr, cap->scale * o->full.width / tw, cap->scale * o->full.height / th);
+	cairo_pattern_t *pat = cairo_pattern_create_for_surface(src);
+	cairo_pattern_set_matrix(pat, &m);
+	cairo_pattern_set_filter(pat, CAIRO_FILTER_GOOD);
+	cairo_set_source(cr, pat);
+	cairo_rectangle(cr, 0, 0, tw, th);
+	cairo_fill(cr);
+	cairo_pattern_destroy(pat);
 	cairo_destroy(cr);
 }
 

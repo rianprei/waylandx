@@ -23,6 +23,7 @@ Written in C11 on top of wlroots 0.20. X11 apps run through a rootless Xwayland 
 | Relative/locked pointer (games), touchpad gestures | relative-pointer, pointer-constraints, pointer-gestures |
 | Drawing tablets, touchscreens, input methods (IME) | tablet-v2, wl_touch, text-input-v3 + input-method-v2 |
 | Secure screen lock | ext-session-lock (swaylock etc.); a crashed locker keeps the screen locked |
+| Sharp X11 apps on HiDPI | X11 renders at the largest monitor scale with `Xft.dpi` set, like KWin |
 
 | From X11 (now also for Wayland apps) | How |
 |---|---|
@@ -32,11 +33,24 @@ Written in C11 on top of wlroots 0.20. X11 apps run through a rootless Xwayland 
 | Input automation (xdotool) | `waylandxctl type/key/click/mousemove`, open virtual keyboard/pointer, `xdotool` shim |
 | Introspection and control (wmctrl/xprop) | `waylandxctl list/info/move/close…`, `wmctrl` shim, foreign-toplevel |
 | Global hotkeys for any program | `waylandxctl bind COMBO CMD` |
-| Clipboard reachable from anywhere | background X11 apps can read it; data-control (wl-clipboard); `xclip`/`xsel` shims |
+| Clipboard reachable from anywhere | background X11 apps read **and set** it (the content even outlives the app); data-control (wl-clipboard); `xclip`/`xsel` shims |
 | Remote app, local window (`ssh -X`) | `waylandx-remote host app` (waypipe), `ssh -X` through Xwayland |
 | Classic WM: floating, title bars, Mod+drag | server-side decorations, Mod+drag, snapping; optional tiling |
 | Laptop lid / docking | lid closes → built-in panel off when an external monitor is attached |
 | Open policy | any local client may capture and inject; only the IPC socket is restricted to your user (0600) |
+| Injected keys trigger WM shortcuts (XTest) | `waylandxctl keydown alt; key Tab` drives Alt+Tab like `xdotool` did on X11 |
+
+| What a full desktop (KDE/GNOME) gives you | How |
+|---|---|
+| Notifications | `waylandx-panel` is the freedesktop notification server: icons, markup, actions, critical stays |
+| System tray | StatusNotifierItem + DBusMenu menus (Discord, Steam, KDE Connect, nm-applet…) |
+| Volume, network, battery in the bar | PipeWire (`wpctl`), NetworkManager, sysfs; click/scroll to change |
+| Volume and brightness OSD, media keys | work out of the box, also on the lock screen; brightness through logind (no root) |
+| Alt+Tab switcher | hold Alt (or Mod), Tab through windows in MRU order, release to switch |
+| Lock and screen off when idle | built in; video players and games that inhibit idle pause it |
+| Lock before suspend, `loginctl lock-session` | logind delay inhibitor, released once the locker is on screen |
+| Night light | `night_light = 20:00-07:00`, 30 minute fades, hardware gamma ramps |
+| App icons | in the task list, notifications, tray and switcher, from your icon theme |
 
 ## Build and test
 
@@ -49,10 +63,18 @@ ninja -C build
 meson test -C build
 ```
 
-`meson test` runs unit tests plus two headless end-to-end suites (`tests/run-headless.sh`,
-`tests/run-multihead.sh`) that start WaylandX without a screen and drive real Wayland and X11
-clients: input injection, IME, screenshots, rules, shims, clipboard, workspaces on two monitors,
-tiling, panel, waypipe, session lock and live config reload. CI runs them normally and under ASan/UBSan.
+`meson test` runs unit tests plus five headless end-to-end suites that start WaylandX without a
+screen and drive real Wayland and X11 clients:
+
+- `run-headless.sh`: input injection, IME, screenshots, rules, shims, clipboard both ways, tiling,
+  panel, waypipe, idle and session lock, live config reload;
+- `run-multihead.sh`: per-monitor workspaces, hotplug, laptop lid;
+- `run-hidpi.sh`: sharp X11 on a scale-2 monitor, input mapping, native-resolution screenshots;
+- `run-session.sh`: lock before suspend, lock-session, brightness and MPRIS against a mock logind;
+- `run-desktop.sh`: notifications, OSD, Alt+Tab, tray items and their menus on a private D-Bus.
+
+CI runs them normally and under ASan/UBSan. Nothing touches your real session: the D-Bus suites use
+a private bus, fake `wpctl` and a fake backlight.
 
 ## Run
 
@@ -89,12 +111,14 @@ Then pick "WaylandX" in your display manager, or run `waylandx-session` from a T
 | Mod+Space | toggle floating for the window |
 | Mod+T | toggle tiling on this workspace |
 | Mod+A / Mod+S | always on top / on all workspaces |
-| Mod+Tab | cycle windows |
+| Alt+Tab / Mod+Tab (+Shift) | window switcher: hold, Tab through, release |
 | Mod+←/→, Mod+↑/↓ | half screen, maximize/restore |
 | Mod+1..9, Mod+Shift+1..9 | switch workspace on this monitor / move window |
 | Mod+H / Mod+L | shrink / grow the master area |
 | Print / Mod+Shift+S | screenshot of the screen / of the window |
 | Mod+Shift+R / Mod+Shift+E | reload config / exit |
+| Ctrl+Alt+L | lock the screen |
+| Volume, brightness, play/pause/next/prev keys | built in, with OSD |
 | Mod+drag (left/right) | move / resize from anywhere in the window |
 
 ## waylandxctl
@@ -111,6 +135,10 @@ waylandxctl mousemove 500 300; waylandxctl click 1 2   # X11 button numbers (4/5
 waylandxctl screenshot ~/shot.png [-o DP-1 | -w 3 | -r 0,0,800,600]
 waylandxctl bind super+F1 notify-send hi   # global hotkey running a command
 waylandxctl subscribe                      # JSON event stream
+waylandxctl lock; waylandxctl screens off  # lock now / screens off until input
+waylandxctl brightness +5%                 # volume up|down|mute, media play-pause|next…
+waylandxctl nightlight on                  # on|off|auto (auto follows night_light)
+waylandxctl switch next                    # Alt+Tab from scripts
 waylandxctl help
 ```
 
@@ -160,9 +188,14 @@ src/inject.c      keyboard/mouse injection (keymap generated on the fly)
 src/capture.c     screenshots
 src/wxproto.c     waylandx-unstable-v1
 src/protocols.c   the remaining Wayland protocols
-src/x11clip.c     X11 clipboard reads without focus
+src/x11clip.c     X11 clipboard both ways without focus
+src/xwlscale.c    sharp X11 on HiDPI (scaled X screen, xdg-output for Xwayland, Xft.dpi)
 src/lock.c        ext-session-lock
-panel/            waylandx-panel (bars + launcher)
+src/idle.c        lock and screens off when idle
+src/logind.c      lock before suspend, lock-session, brightness, MPRIS
+src/nightlight.c  night light
+src/switcher.c    Alt+Tab
+panel/            waylandx-panel: bars, launcher, notifications, tray, status, OSD, switcher
 ctl/              waylandxctl
 shims/            xdotool, wmctrl, xclip, xsel
 session/          waylandx-session, waylandx-remote, .desktop, portal configs
@@ -171,10 +204,13 @@ tests/            unit tests, Wayland/X11/IME probes, headless end-to-end suites
 
 ## Known limitations
 
-- **X11 apps on monitors with scale > 1** are upscaled (blurry); wlroots 0.20 has no Xwayland scaling API.
-- **An unfocused X11 app taking clipboard ownership** (e.g. the real `xclip -i` run from a Wayland
-  terminal) is ignored by wlroots; use the `xclip`/`xsel` shims for that. Reading the clipboard from
-  background X11 apps works, and copying from a focused X11 app works as usual.
+- **X11 apps that ignore `Xft.dpi`** (old Xlib/Motif apps) look small on HiDPI with the default
+  `xwayland_scale = auto`; set `xwayland_scale = 1` to stretch them instead. X11 cursors are drawn at
+  the right size but not at full resolution.
+- **Night light** needs hardware gamma ramps (any real monitor on DRM) or the Vulkan renderer; nested
+  sessions on the GLES2 renderer get no tint.
+- **Tray menus** are mouse-driven (no keyboard navigation yet); submenus open in place of their parent.
+- **Notifications** have no history panel and no inline images in the body.
 - **Tablet pads** pair with the most recently connected tablet (fine for one tablet; several tablets
   at once are not distinguished).
 - **Not tested on real hardware so far:** TTY/DRM session, VRR and tearing on a physical monitor, physical

@@ -81,6 +81,7 @@ static void send_mods(struct wx_server *server, uint32_t mods) {
 	 * also drive compositor actions (e.g. keydown super + drag) */
 	wlr_keyboard_notify_modifiers(server->inject_kb, mods, 0, 0, 0);
 	wlr_seat_keyboard_notify_modifiers(server->seat, &server->inject_kb->modifiers);
+	switcher_modifiers(server, mods); /* keyup alt ends an Alt+Tab, as on a real keyboard */
 }
 
 static void send_key(struct wx_server *server, int index, bool pressed) {
@@ -203,8 +204,11 @@ bool inject_key_combo(struct wx_server *server, const char *combo, int press_mod
 		*err = strdup(buf);
 		return false;
 	}
-	/* Like X11 XTest: injected keys can trigger compositor bindings too. */
-	if (press_mode == 0 && binds_handle(server, mods, sym)) {
+	/* modifiers held by earlier keydowns stay held, like xdotool keydown */
+	static uint32_t held;
+	/* Like X11 XTest: injected keys can trigger compositor bindings too,
+	 * including with modifiers held by an earlier keydown. */
+	if (press_mode == 0 && (switcher_key(server, sym) || binds_handle(server, held | mods, sym))) {
 		return true;
 	}
 	struct keyent key = {sym, true};
@@ -215,8 +219,6 @@ bool inject_key_combo(struct wx_server *server, const char *combo, int press_mod
 	}
 	wlr_seat_set_keyboard(server->seat, NULL);
 	wlr_seat_set_keyboard(server->seat, server->inject_kb);
-	/* modifiers held by earlier keydowns stay held, like xdotool keydown */
-	static uint32_t held;
 	if (press_mode == 1) {
 		held |= mods;
 	}

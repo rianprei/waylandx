@@ -108,6 +108,7 @@ struct wx_output {
 	struct wlr_scene_rect *lock_bg;
 	struct wlr_scene_rect *background; /* solid desktop color under layer-shell wallpapers */
 	bool lid_disabled;       /* turned off because the laptop lid closed */
+	bool dpms_off;           /* turned off by the idle timer; input wakes it */
 	struct wl_list captures; /* wx_capture_part.link pending on this output */
 	int workspace;           /* 1..WX_WORKSPACES shown on this output */
 	bool tiling[WX_WORKSPACES + 1];
@@ -281,6 +282,14 @@ struct wx_server {
 	struct wlr_xdg_shell *xdg_shell;
 	struct wlr_layer_shell_v1 *layer_shell;
 	struct wlr_xwayland *xwayland;
+	double xwl_scale;                 /* X screen pixels per layout unit */
+	bool xwayland_waiting;            /* started with the session, WM not up yet */
+	struct wl_event_source *xwayland_timer;
+	bool autostarted;
+	const char *startup_cmd;
+	struct wl_global *xwl_output_global; /* xdg-output seen only by Xwayland */
+	struct wlr_xdg_output_manager_v1 *xdg_output_mgr;
+	struct wlr_gamma_control_manager_v1 *gamma_mgr;
 	struct wl_listener new_xdg_toplevel;
 	struct wl_listener new_xdg_popup;
 	struct wl_listener new_layer_surface;
@@ -373,6 +382,8 @@ struct wx_server {
 
 	/* session lock */
 	bool locked;
+	bool screens_off;        /* idle turned the screens off */
+	bool lock_shown;         /* a lock surface is on screen */
 	struct wlr_session_lock_v1 *lock;
 	struct wl_listener lock_new_surface;
 	struct wl_listener lock_unlock;
@@ -443,11 +454,60 @@ bool ime_handle_modifiers(struct wx_server *server, struct wx_keyboard *kb);
 /* xdg.c */
 void xdg_init(struct wx_server *server);
 
+void server_autostart(struct wx_server *server);
+
 /* xwayland.c */
 void xwayland_init(struct wx_server *server);
+void xwayland_configure(struct wx_view *view);
+
+/* switcher.c */
+void switcher_step(struct wx_server *server, bool forward);
+void switcher_modifiers(struct wx_server *server, uint32_t mods);
+bool switcher_key(struct wx_server *server, xkb_keysym_t sym);
+bool switcher_active(void);
+
+/* nightlight.c */
+void nightlight_init(struct wx_server *server);
+void nightlight_finish(struct wx_server *server);
+void nightlight_update(struct wx_server *server);
+bool nightlight_set_mode(struct wx_server *server, const char *mode);
+int nightlight_current(void);
+int nightlight_target(const char *schedule, int night_k, int minute);
+struct wlr_color_transform *nightlight_transform(struct wlr_output *output);
+void nightlight_reapply(struct wx_server *server);
+
+/* logind.c */
+void logind_init(struct wx_server *server);
+void logind_finish(struct wx_server *server);
+void logind_apply_config(struct wx_server *server);
+void logind_lock_changed(struct wx_server *server);
+bool logind_brightness(struct wx_server *server, const char *arg, int *percent, char **err);
+bool logind_media(struct wx_server *server, const char *action, char **err);
+
+/* idle.c */
+void idle_init(struct wx_server *server);
+void idle_finish(struct wx_server *server);
+void idle_activity(struct wx_server *server);
+void idle_set_inhibited(struct wx_server *server, bool on);
+void idle_rearm(struct wx_server *server);
+void idle_lock_now(struct wx_server *server);
+void idle_set_screens(struct wx_server *server, bool on);
+
+/* xwlscale.c */
+void xwlscale_init(struct wx_server *server);
+double xwayland_scale(struct wx_server *server);
+int xwl_to_x11(struct wx_server *server, int v);
+int xwl_from_x11(struct wx_server *server, int v);
+double input_surface_scale(struct wx_server *server, struct wlr_surface *surface);
+void xwayland_scale_content(struct wx_view *view);
+void xwayland_update_scale(struct wx_server *server);
+void xwayland_scale_ready(struct wx_server *server);
+void xwl_outputs_update(struct wx_server *server);
+void xwl_output_destroyed(struct wlr_output *output);
 
 /* x11clip.c */
 void x11clip_init(struct wx_server *server);
+void x11clip_finish(struct wx_server *server);
 
 /* layer.c */
 void layer_init(struct wx_server *server);

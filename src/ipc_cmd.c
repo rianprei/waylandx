@@ -379,8 +379,10 @@ static const char *default_binds[][2] = {
 	{"Mod+t", "tiling toggle"},
 	{"Mod+a", "above toggle"},
 	{"Mod+s", "sticky toggle"},
-	{"Mod+Tab", "focus next"},
-	{"Mod+Shift+Tab", "focus prev"},
+	{"Mod+Tab", "switch next"},
+	{"Mod+Shift+Tab", "switch prev"},
+	{"Alt+Tab", "switch next"},
+	{"Alt+Shift+Tab", "switch prev"},
 	{"Mod+Left", "snap left"},
 	{"Mod+Right", "snap right"},
 	{"Mod+Up", "maximize on"},
@@ -391,6 +393,19 @@ static const char *default_binds[][2] = {
 	{"Mod+Shift+e", "exit"},
 	{"Print", "screenshot"},
 	{"Mod+Shift+s", "screenshot -w focused"},
+	{"Ctrl+Alt+l", "lock"},
+	/* media keys work on the lock screen too */
+	{"XF86MonBrightnessUp", "brightness +5%"},
+	{"XF86MonBrightnessDown", "brightness -5%"},
+	{"XF86AudioRaiseVolume", "volume up"},
+	{"XF86AudioLowerVolume", "volume down"},
+	{"XF86AudioMute", "volume mute"},
+	{"XF86AudioMicMute", "volume mic-mute"},
+	{"XF86AudioPlay", "media play-pause"},
+	{"XF86AudioPause", "media pause"},
+	{"XF86AudioStop", "media stop"},
+	{"XF86AudioNext", "media next"},
+	{"XF86AudioPrev", "media previous"},
 };
 
 void binds_reload(struct wx_server *server) {
@@ -1037,7 +1052,10 @@ static const char *help_text =
 	"  type TEXT | key COMBO... | keydown COMBO | keyup COMBO\n"
 	"  mousemove X Y | mousemove_rel DX DY | click [BUTTON] [COUNT] | mousedown B | mouseup B\n"
 	"  scroll DX DY | screenshot [PATH] [-o OUTPUT|-w ID|-r X,Y,W,H]\n"
-	"  bind COMBO | unbind COMBO | subscribe | lid open|closed | ping";
+	"  bind COMBO | unbind COMBO | subscribe | lid open|closed | ping\n"
+	"  switch next|prev (hold the modifier to pick, like Alt+Tab)\n"
+	"  lock | screens on|off | brightness [+N%|-N%|N%] | volume up|down|mute|mic-mute\n"
+	"  media play-pause|play|pause|stop|next|previous | nightlight [on|off|auto]";
 
 bool ipc_cmd_run(struct wx_server *server, struct wx_ipc_client *client, const char *line,
 		struct wx_buf *out) {
@@ -1063,6 +1081,13 @@ bool ipc_cmd_run(struct wx_server *server, struct wx_ipc_client *client, const c
 		goto out;
 	}
 	const char *name = c.argv[0];
+	static const char *input_cmds[] = {"type", "key", "keydown", "keyup", "mousemove",
+		"mousemove_rel", "click", "mousedown", "mouseup", "scroll"};
+	for (size_t i = 0; i < sizeof(input_cmds) / sizeof(input_cmds[0]); i++) {
+		if (!strcmp(name, input_cmds[i])) {
+			idle_activity(server); /* like XTest resetting the X screensaver */
+		}
+	}
 	if (!strcmp(name, "ping")) {
 		buf_puts(out, "{\"ok\":true,\"pong\":true}");
 	} else if (!strcmp(name, "version")) {
@@ -1165,6 +1190,70 @@ bool ipc_cmd_run(struct wx_server *server, struct wx_ipc_client *client, const c
 			reply_err(out, "usage: lid open|closed");
 		} else {
 			input_lid(server, !strcmp(c.argv[1], "closed"));
+			reply_ok(out);
+		}
+	} else if (!strcmp(name, "brightness")) {
+		int pct = 0;
+		char *err = NULL;
+		if (logind_brightness(server, c.argc > 1 ? c.argv[1] : "", &pct, &err)) {
+			buf_printf(out, "{\"ok\":true,\"percent\":%d}", pct);
+			char ev[64];
+			snprintf(ev, sizeof(ev), "{\"event\":\"brightness\",\"percent\":%d}", pct);
+			ipc_broadcast_event(server, ev);
+		} else {
+			reply_err(out, "%s", err);
+		}
+		free(err);
+	} else if (!strcmp(name, "volume")) {
+		/* PipeWire through wpctl; the panel shows the OSD on the event */
+		static const char *vol[][2] = {
+			{"up", "wpctl set-volume -l 1.5 @DEFAULT_AUDIO_SINK@ 5%+"},
+			{"down", "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"},
+			{"mute", "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"},
+			{"mic-mute", "wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle"},
+		};
+		const char *cmd = NULL;
+		for (size_t i = 0; c.argc == 2 && i < sizeof(vol) / sizeof(vol[0]); i++) {
+			if (!strcmp(c.argv[1], vol[i][0])) {
+				cmd = vol[i][1];
+			}
+		}
+		if (!cmd) {
+			reply_err(out, "usage: volume up|down|mute|mic-mute");
+		} else {
+			server_spawn(server, cmd);
+			ipc_broadcast_event(server, "{\"event\":\"volume\"}");
+			reply_ok(out);
+		}
+	} else if (!strcmp(name, "media")) {
+		char *err = NULL;
+		if (c.argc == 2 && logind_media(server, c.argv[1], &err)) {
+			reply_ok(out);
+		} else {
+			reply_err(out, "%s", err ? err : "usage: media play-pause|play|pause|stop|next|previous");
+		}
+		free(err);
+	} else if (!strcmp(name, "switch")) {
+		if (c.argc != 2 || (strcmp(c.argv[1], "next") && strcmp(c.argv[1], "prev"))) {
+			reply_err(out, "usage: switch next|prev");
+		} else {
+			switcher_step(server, !strcmp(c.argv[1], "next"));
+			reply_ok(out);
+		}
+	} else if (!strcmp(name, "nightlight")) {
+		if (c.argc == 2 && !nightlight_set_mode(server, c.argv[1])) {
+			reply_err(out, "usage: nightlight [on|off|auto]");
+		} else {
+			buf_printf(out, "{\"ok\":true,\"temperature\":%d}", nightlight_current());
+		}
+	} else if (!strcmp(name, "lock")) {
+		idle_lock_now(server);
+		reply_ok(out);
+	} else if (!strcmp(name, "screens")) {
+		if (c.argc != 2 || (strcmp(c.argv[1], "on") && strcmp(c.argv[1], "off"))) {
+			reply_err(out, "usage: screens on|off");
+		} else {
+			idle_set_screens(server, !strcmp(c.argv[1], "on"));
 			reply_ok(out);
 		}
 	} else if (!strcmp(name, "subscribe")) {

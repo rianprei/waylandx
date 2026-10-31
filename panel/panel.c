@@ -16,15 +16,23 @@
 #include <wayland-client.h>
 #include <xkbcommon/xkbcommon.h>
 #include "ext-workspace-v1-client-protocol.h"
+#include "icons.h"
 #include "launcher.h"
+#include "notify.h"
+#include "panel.h"
+#include "status.h"
+#include "tray.h"
+#include "winswitch.h"
 #include "wlr-foreign-toplevel-management-unstable-v1-client-protocol.h"
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
 
 /*
  * waylandx-panel: one top bar per monitor with that monitor's workspaces and
- * windows, a clock and a keyboard launcher. Uses only standard protocols
- * (layer-shell, foreign-toplevel, ext-workspace) plus the WaylandX IPC
- * "launcher" event for Mod+D.
+ * windows (with app icons), audio/network/battery status, a clock and a
+ * keyboard launcher; plus the desktop notification server and the
+ * volume/brightness OSD. Uses only standard protocols (layer-shell,
+ * foreign-toplevel, ext-workspace), D-Bus for notifications, and the WaylandX
+ * IPC events for Mod+D and the OSD.
  */
 
 #define BAR_H 28
@@ -57,7 +65,7 @@ struct workspace {
 };
 
 struct hit {
-	int kind; /* 0 workspace, 1 task, 2 apps button */
+	int kind; /* 0 workspace, 1 task, 2 apps button, 3 status item (index = enum status_item) */
 	int index;
 	double x0, x1;
 };
@@ -72,7 +80,7 @@ struct bar {
 	struct zwlr_layer_surface_v1 *layer;
 	int width, height;
 	bool configured, dirty;
-	struct hit hits[MAX_WS + MAX_TASKS + 1];
+	struct hit hits[MAX_WS + MAX_TASKS + 48];
 	int nhits;
 };
 
@@ -90,8 +98,10 @@ static struct {
 	struct xkb_keymap *keymap;
 	struct xkb_state *xkb_state;
 	bool running;
-	double ptr_x;
+	double ptr_x, ptr_y;
 	struct bar *ptr_bar;
+	struct popup *ptr_popup;
+	struct wl_list popups;
 
 	struct wl_list bars;
 	struct task tasks[MAX_TASKS];
@@ -121,10 +131,47 @@ static void mark_all_dirty(void) {
 
 /* ---------- drawing ---------- */
 
-static void set_rgb(cairo_t *cr, uint32_t rgb, double a) {
+void panel_set_rgb(cairo_t *cr, uint32_t rgb, double a) {
 	cairo_set_source_rgba(cr, ((rgb >> 16) & 0xff) / 255.0, ((rgb >> 8) & 0xff) / 255.0,
 		(rgb & 0xff) / 255.0, a);
 }
+
+#define set_rgb panel_set_rgb
+
+void panel_round_rect(cairo_t *cr, double x, double y, double w, double h, double r) {
+	cairo_new_sub_path(cr);
+	cairo_arc(cr, x + w - r, y + r, r, -G_PI / 2, 0);
+	cairo_arc(cr, x + w - r, y + h - r, r, 0, G_PI / 2);
+	cairo_arc(cr, x + r, y + h - r, r, G_PI / 2, G_PI);
+	cairo_arc(cr, x + r, y + r, r, G_PI, 3 * G_PI / 2);
+	cairo_close_path(cr);
+}
+
+void panel_paint_icon(cairo_t *cr, cairo_surface_t *s, double x, double y, double size,
+		double alpha) {
+	int w = cairo_image_surface_get_width(s), h = cairo_image_surface_get_height(s);
+	if (w <= 0 || h <= 0) {
+		return;
+	}
+	cairo_save(cr);
+	cairo_translate(cr, x, y);
+	cairo_scale(cr, size / w, size / h);
+	cairo_set_source_surface(cr, s, 0, 0);
+	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+	cairo_paint_with_alpha(cr, alpha);
+	cairo_restore(cr);
+}
+
+int panel_bar_height(void) {
+	return BAR_H;
+}
+
+void panel_spawn(const char *cmd) {
+	launch_command(cmd);
+}
+
+/* Largest output scale: popups are not tied to one output. */
+static int max_scale(void);
 
 static double text(cairo_t *cr, PangoLayout *l, int bar_h, const char *s, double x, double maxw,
 		uint32_t rgb) {
@@ -200,6 +247,36 @@ static void draw_launcher(struct bar *b, cairo_t *cr, PangoLayout *l) {
 	}
 }
 
+static void status_hit(void *ctx, int item, double x0, double x1) {
+	add_hit(ctx, 3, item, x0, x1);
+}
+
+static void ensure_apps(void) {
+	if (!P.apps_loaded) {
+		apps_load(&P.apps);
+		P.apps_loaded = true;
+	}
+}
+
+/* App icon of a window, from its desktop entry or its app_id as an icon name. */
+static cairo_surface_t *task_icon(struct task *t, int scale) {
+	if (!t->app_id) {
+		return NULL;
+	}
+	ensure_apps();
+	const struct app_entry *e = apps_for_app_id(&P.apps, t->app_id);
+	cairo_surface_t *s = e && e->icon ? icon_get(e->icon, 16 * scale) : NULL;
+	if (!s) {
+		s = icon_get(t->app_id, 16 * scale);
+	}
+	if (!s) {
+		char *lower = g_ascii_strdown(t->app_id, -1);
+		s = icon_get(lower, 16 * scale);
+		g_free(lower);
+	}
+	return s;
+}
+
 static void draw_bar(struct bar *b, cairo_t *cr, PangoLayout *l) {
 	int w = b->width, h = b->height;
 	b->nhits = 0;
@@ -240,12 +317,14 @@ static void draw_bar(struct bar *b, cairo_t *cr, PangoLayout *l) {
 	int cw, ch;
 	pango_layout_get_pixel_size(l, &cw, &ch);
 	text(cr, l, h, clk, w - cw - 10, 0, 0xdddddd);
+	double right = status_draw(cr, l, h, w - cw - 22, status_hit, b);
+	right = tray_draw(cr, h, right - 6, 0, status_hit, b);
 
 	int n = 0;
 	for (int i = 0; i < P.ntasks; i++) {
 		n += task_on_bar(&P.tasks[i], b);
 	}
-	double avail = w - cw - 24 - x;
+	double avail = right - 10 - x;
 	double tw = n > 0 ? avail / n : 0;
 	if (tw > 220) {
 		tw = 220;
@@ -264,18 +343,33 @@ static void draw_bar(struct bar *b, cairo_t *cr, PangoLayout *l) {
 			cairo_fill(cr);
 		}
 		const char *label = t->title && *t->title ? t->title : (t->app_id ? t->app_id : "?");
-		text(cr, l, h, label, x + 6, tw - 14, t->minimized ? 0x6c717c : 0xe6e6e6);
+		double tx = x + 6;
+		cairo_surface_t *ic = task_icon(t, b->scale > 0 ? b->scale : 1);
+		if (ic && tw > 60) {
+			cairo_save(cr);
+			cairo_translate(cr, tx, (h - 16) / 2.0);
+			cairo_scale(cr, 16.0 / cairo_image_surface_get_width(ic),
+				16.0 / cairo_image_surface_get_height(ic));
+			cairo_set_source_surface(cr, ic, 0, 0);
+			cairo_paint_with_alpha(cr, t->minimized ? 0.45 : 1);
+			cairo_restore(cr);
+			tx += 22;
+		}
+		text(cr, l, h, label, tx, tw - 8 - (tx - x), t->minimized ? 0x6c717c : 0xe6e6e6);
 		add_hit(b, 1, i, x, x + tw - 4);
 		x += tw;
 	}
 }
 
-static void draw(struct bar *b) {
-	if (!b->configured || b->width <= 0) {
+typedef void (*paint_fn)(void *ctx, cairo_t *cr, PangoLayout *l);
+
+/* Paints w x h logical pixels at the given scale into a new shm buffer. */
+static void render(struct wl_surface *surface, int lw, int lh, int s, uint32_t bg, double bg_a,
+		paint_fn paint, void *ctx) {
+	int w = lw * s, h = lh * s, stride = w * 4, size = stride * h;
+	if (w <= 0 || h <= 0) {
 		return;
 	}
-	int s = b->scale > 0 ? b->scale : 1;
-	int w = b->width * s, h = b->height * s, stride = w * 4, size = stride * h;
 	int fd = memfd_create("panel", MFD_CLOEXEC);
 	if (fd < 0 || ftruncate(fd, size) < 0) {
 		if (fd >= 0) {
@@ -291,7 +385,7 @@ static void draw(struct bar *b) {
 	cairo_surface_t *cs = cairo_image_surface_create_for_data(data, CAIRO_FORMAT_ARGB32, w, h, stride);
 	cairo_t *cr = cairo_create(cs);
 	cairo_scale(cr, s, s);
-	set_rgb(cr, 0x16181d, 0.96);
+	set_rgb(cr, bg, bg_a);
 	cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
 	cairo_paint(cr);
 	cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
@@ -301,11 +395,7 @@ static void draw(struct bar *b) {
 	pango_font_description_free(font);
 	pango_layout_set_ellipsize(l, PANGO_ELLIPSIZE_END);
 	pango_layout_set_single_paragraph_mode(l, TRUE);
-	if (P.launcher == b) {
-		draw_launcher(b, cr, l);
-	} else {
-		draw_bar(b, cr, l);
-	}
+	paint(ctx, cr, l);
 	g_object_unref(l);
 	cairo_destroy(cr);
 	cairo_surface_destroy(cs);
@@ -315,11 +405,137 @@ static void draw(struct bar *b) {
 	wl_buffer_add_listener(buf, &buffer_listener, NULL);
 	wl_shm_pool_destroy(pool);
 	close(fd);
-	wl_surface_set_buffer_scale(b->surface, s);
-	wl_surface_attach(b->surface, buf, 0, 0);
-	wl_surface_damage_buffer(b->surface, 0, 0, w, h);
-	wl_surface_commit(b->surface);
+	wl_surface_set_buffer_scale(surface, s);
+	wl_surface_attach(surface, buf, 0, 0);
+	wl_surface_damage_buffer(surface, 0, 0, w, h);
+	wl_surface_commit(surface);
+}
+
+static void paint_bar(void *ctx, cairo_t *cr, PangoLayout *l) {
+	struct bar *b = ctx;
+	if (P.launcher == b) {
+		draw_launcher(b, cr, l);
+	} else {
+		draw_bar(b, cr, l);
+	}
+}
+
+static void draw(struct bar *b) {
+	if (!b->configured || b->width <= 0) {
+		return;
+	}
+	render(b->surface, b->width, b->height, b->scale > 0 ? b->scale : 1, 0x16181d, 0.96,
+		paint_bar, b);
 	b->dirty = false;
+}
+
+/* ---------- popups (notifications, OSD) ---------- */
+
+static int max_scale(void) {
+	int s = 1;
+	struct bar *b;
+	wl_list_for_each(b, &P.bars, link) {
+		if (b->scale > s) {
+			s = b->scale;
+		}
+	}
+	return s;
+}
+
+static void paint_popup(void *ctx, cairo_t *cr, PangoLayout *l) {
+	struct popup *p = ctx;
+	p->draw(p, cr, l);
+}
+
+static void popup_draw(struct popup *p) {
+	if (!p->configured) {
+		return;
+	}
+	render(p->surface, p->width, p->height, max_scale(), 0, 0, paint_popup, p);
+	p->dirty = false;
+}
+
+static void popup_configure(void *d, struct zwlr_layer_surface_v1 *l, uint32_t serial, uint32_t w,
+		uint32_t h) {
+	struct popup *p = d;
+	zwlr_layer_surface_v1_ack_configure(l, serial);
+	if (w && h) { /* anchored to opposite edges: the compositor picks the size */
+		p->width = (int)w;
+		p->height = (int)h;
+	}
+	p->configured = true;
+	popup_draw(p);
+}
+
+static void popup_closed(void *d, struct zwlr_layer_surface_v1 *l) {
+	struct popup *p = d;
+	p->configured = false; /* its output went away; the owner will destroy it */
+}
+
+static const struct zwlr_layer_surface_v1_listener popup_listener = {
+	.configure = popup_configure, .closed = popup_closed,
+};
+
+struct popup *popup_create(enum popup_layer layer, uint32_t anchor, const int margin[4], int w,
+		int h, const char *ns, popup_draw_fn draw_fn, popup_click_fn click_fn, void *data) {
+	if (!P.compositor || !P.layer_shell) {
+		return NULL;
+	}
+	struct popup *p = calloc(1, sizeof(*p));
+	p->width = w;
+	p->height = h;
+	p->draw = draw_fn;
+	p->click = click_fn;
+	p->data = data;
+	p->surface = wl_compositor_create_surface(P.compositor);
+	p->layer = zwlr_layer_shell_v1_get_layer_surface(P.layer_shell, p->surface, NULL, layer, ns);
+	zwlr_layer_surface_v1_add_listener(p->layer, &popup_listener, p);
+	zwlr_layer_surface_v1_set_anchor(p->layer, anchor);
+	zwlr_layer_surface_v1_set_margin(p->layer, margin[0], margin[1], margin[2], margin[3]);
+	zwlr_layer_surface_v1_set_size(p->layer, (uint32_t)w, (uint32_t)h);
+	zwlr_layer_surface_v1_set_exclusive_zone(p->layer, -1);
+	wl_surface_commit(p->surface);
+	wl_list_insert(&P.popups, &p->link);
+	return p;
+}
+
+void popup_resize(struct popup *p, int w, int h) {
+	if (p->width == w && p->height == h) {
+		popup_damage(p);
+		return;
+	}
+	p->width = w;
+	p->height = h;
+	zwlr_layer_surface_v1_set_size(p->layer, (uint32_t)w, (uint32_t)h);
+	wl_surface_commit(p->surface); /* the configure that follows redraws */
+}
+
+void popup_damage(struct popup *p) {
+	p->dirty = true;
+}
+
+void popup_destroy(struct popup *p) {
+	if (P.ptr_popup == p) {
+		P.ptr_popup = NULL;
+	}
+	zwlr_layer_surface_v1_destroy(p->layer);
+	wl_surface_destroy(p->surface);
+	wl_list_remove(&p->link);
+	free(p);
+}
+
+void panel_redraw_bars(void) {
+	mark_all_dirty();
+}
+
+static struct popup *popup_of_surface(struct wl_surface *s) {
+	struct popup *p;
+	wl_list_for_each(p, &P.popups, link) {
+		if (p->surface == s) {
+			return p;
+		}
+	}
+	return NULL;
 }
 
 /* ---------- launcher ---------- */
@@ -696,6 +912,10 @@ static void click(struct bar *b, uint32_t button) {
 			ext_workspace_manager_v1_commit(P.ws_mgr);
 		} else if (h->kind == 2) {
 			launcher_open(b);
+		} else if (h->kind == 3 && h->index >= 100) {
+			tray_click(h->index, button, h->x0, h->x1, b->width);
+		} else if (h->kind == 3) {
+			status_click(h->index, button);
 		} else if (h->kind == 1 && h->index < P.ntasks) {
 			struct task *t = &P.tasks[h->index];
 			if (button == 0x112) { /* BTN_MIDDLE */
@@ -726,28 +946,66 @@ static struct bar *bar_of_surface(struct wl_surface *s) {
 static void p_enter(void *d, struct wl_pointer *p, uint32_t serial, struct wl_surface *s,
 		wl_fixed_t x, wl_fixed_t y) {
 	P.ptr_bar = bar_of_surface(s);
+	P.ptr_popup = P.ptr_bar ? NULL : popup_of_surface(s);
 	P.ptr_x = wl_fixed_to_double(x);
+	P.ptr_y = wl_fixed_to_double(y);
+	if (P.ptr_popup && P.ptr_popup->motion) {
+		P.ptr_popup->motion(P.ptr_popup, P.ptr_x, P.ptr_y);
+	}
 }
 
 static void p_leave(void *d, struct wl_pointer *p, uint32_t serial, struct wl_surface *s) {
+	if (P.ptr_popup && P.ptr_popup->motion) {
+		P.ptr_popup->motion(P.ptr_popup, -1, -1);
+	}
 	P.ptr_bar = NULL;
+	P.ptr_popup = NULL;
 }
 
 static void p_motion(void *d, struct wl_pointer *p, uint32_t t, wl_fixed_t x, wl_fixed_t y) {
 	P.ptr_x = wl_fixed_to_double(x);
+	P.ptr_y = wl_fixed_to_double(y);
+	if (P.ptr_popup && P.ptr_popup->motion) {
+		P.ptr_popup->motion(P.ptr_popup, P.ptr_x, P.ptr_y);
+	}
 }
 
 static void p_button(void *d, struct wl_pointer *p, uint32_t serial, uint32_t t, uint32_t button,
 		uint32_t state) {
-	if (state == WL_POINTER_BUTTON_STATE_PRESSED && P.ptr_bar) {
-		click(P.ptr_bar, button);
+	if (state != WL_POINTER_BUTTON_STATE_PRESSED) {
+		return;
 	}
+	if (P.ptr_bar) {
+		click(P.ptr_bar, button);
+	} else if (P.ptr_popup && P.ptr_popup->click) {
+		P.ptr_popup->click(P.ptr_popup, P.ptr_x, P.ptr_y, button);
+	}
+}
+
+/* Status item under the pointer, or -1. */
+static int status_item_at(struct bar *b) {
+	for (int i = 0; i < b->nhits; i++) {
+		struct hit *h = &b->hits[i];
+		if (h->kind == 3 && P.ptr_x >= h->x0 && P.ptr_x < h->x1) {
+			return h->index;
+		}
+	}
+	return -1;
 }
 
 static void p_axis(void *d, struct wl_pointer *p, uint32_t t, uint32_t axis, wl_fixed_t v) {
 	/* scroll over a bar switches that monitor's workspace, like X11 pagers */
 	struct bar *b = P.ptr_bar;
 	if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL || !b || P.launcher) {
+		return;
+	}
+	int item = status_item_at(b);
+	if (item >= 100) {
+		tray_scroll(item, wl_fixed_to_double(v));
+		return;
+	}
+	if (item >= 0) {
+		status_scroll(item, wl_fixed_to_double(v));
 		return;
 	}
 	int idx[MAX_WS], n = 0, cur = -1;
@@ -1024,6 +1282,20 @@ static struct bar *bar_for_output_name(const char *name) {
 }
 
 static void ipc_line(const char *line) {
+	const char *pct = strstr(line, "\"percent\":");
+	if (strstr(line, "\"event\":\"brightness\"") && pct) {
+		status_osd_brightness(atoi(pct + 10));
+		return;
+	}
+	if (strstr(line, "\"event\":\"volume\"")) {
+		status_osd_volume();
+		return;
+	}
+	if (strstr(line, "\"event\":\"switcher\"")) {
+		ensure_apps();
+		winswitch_event(line, &P.apps);
+		return;
+	}
 	if (!strstr(line, "\"event\":\"launcher\"")) {
 		return;
 	}
@@ -1070,6 +1342,7 @@ int main(int argc, char *argv[]) {
 	signal(SIGCHLD, SIG_IGN);
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	wl_list_init(&P.bars);
+	wl_list_init(&P.popups);
 	P.running = true;
 	P.ipc_fd = -1;
 	P.xkb = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
@@ -1091,6 +1364,9 @@ int main(int argc, char *argv[]) {
 	}
 	wl_display_roundtrip(P.display);
 	P.ipc_fd = ipc_connect();
+	notify_init();
+	status_init();
+	tray_init();
 	if (argc > 1 && !strcmp(argv[1], "--launcher") && !wl_list_empty(&P.bars)) {
 		launcher_open(wl_container_of(P.bars.next, b, link));
 	}
@@ -1098,21 +1374,41 @@ int main(int argc, char *argv[]) {
 	int last_min = -1;
 	while (P.running) {
 		/* outputs plugged in after start get their bar here */
+		notify_tick();
+		status_tick();
 		wl_list_for_each(b, &P.bars, link) {
 			bar_create_surface(b);
 			if (b->dirty) {
 				draw(b);
 			}
 		}
+		struct popup *pp;
+		wl_list_for_each(pp, &P.popups, link) {
+			if (pp->dirty) {
+				popup_draw(pp);
+			}
+		}
 		while (wl_display_prepare_read(P.display) != 0) {
 			wl_display_dispatch_pending(P.display);
 		}
 		wl_display_flush(P.display);
-		struct pollfd fds[2] = {
+		tray_dispatch(); /* replies read during other calls may be queued */
+		struct pollfd fds[5] = {
 			{.fd = wl_display_get_fd(P.display), .events = POLLIN},
 			{.fd = P.ipc_fd, .events = POLLIN},
+			{.fd = notify_fd(), .events = POLLIN},
+			{.fd = status_fd(), .events = POLLIN},
+			{.fd = tray_fd(), .events = POLLIN},
 		};
-		int r = poll(fds, P.ipc_fd >= 0 ? 2 : 1, 1000);
+		int timeout = 1000;
+		int nt = notify_next_ms(), st = status_next_ms();
+		if (nt >= 0 && nt < timeout) {
+			timeout = nt;
+		}
+		if (st >= 0 && st < timeout) {
+			timeout = st;
+		}
+		int r = poll(fds, 5, timeout);
 		if (r > 0 && (fds[0].revents & POLLIN)) {
 			wl_display_read_events(P.display);
 		} else {
@@ -1123,6 +1419,15 @@ int main(int argc, char *argv[]) {
 		}
 		if (P.ipc_fd >= 0 && r > 0 && (fds[1].revents & (POLLIN | POLLHUP))) {
 			ipc_read();
+		}
+		if (r > 0 && fds[2].fd >= 0 && fds[2].revents) {
+			notify_dispatch();
+		}
+		if (r > 0 && fds[3].fd >= 0 && fds[3].revents) {
+			status_dispatch();
+		}
+		if (r > 0 && fds[4].fd >= 0 && fds[4].revents) {
+			tray_dispatch();
 		}
 		time_t now = time(NULL);
 		struct tm tm;

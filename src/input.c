@@ -40,9 +40,7 @@ uint32_t input_now(void) {
 }
 
 static void notify_activity(struct wx_server *server) {
-	if (server->idle_notifier) {
-		wlr_idle_notifier_v1_notify_activity(server->idle_notifier, server->seat);
-	}
+	idle_activity(server);
 }
 
 /* ---------- keyboard ---------- */
@@ -80,6 +78,7 @@ static void keyboard_configure(struct wx_server *server, struct wx_keyboard *kb)
 
 static void keyboard_modifiers(struct wl_listener *listener, void *data) {
 	struct wx_keyboard *kb = wl_container_of(listener, kb, modifiers);
+	switcher_modifiers(kb->server, wlr_keyboard_get_modifiers(kb->wlr_keyboard));
 	if (ime_handle_modifiers(kb->server, kb)) {
 		return;
 	}
@@ -119,6 +118,20 @@ static bool handle_vt_switch(struct wx_server *server, xkb_keysym_t sym) {
 	return false;
 }
 
+/* XF86 volume/brightness/player keys: allowed on the lock screen, like KWin */
+static bool is_media_key(xkb_keysym_t sym) {
+	switch (sym) {
+	case XKB_KEY_XF86MonBrightnessUp: case XKB_KEY_XF86MonBrightnessDown:
+	case XKB_KEY_XF86AudioRaiseVolume: case XKB_KEY_XF86AudioLowerVolume:
+	case XKB_KEY_XF86AudioMute: case XKB_KEY_XF86AudioMicMute:
+	case XKB_KEY_XF86AudioPlay: case XKB_KEY_XF86AudioPause: case XKB_KEY_XF86AudioStop:
+	case XKB_KEY_XF86AudioNext: case XKB_KEY_XF86AudioPrev:
+		return true;
+	default:
+		return false;
+	}
+}
+
 static void keyboard_key(struct wl_listener *listener, void *data) {
 	struct wx_keyboard *kb = wl_container_of(listener, kb, key);
 	struct wx_server *server = kb->server;
@@ -135,20 +148,27 @@ static void keyboard_key(struct wl_listener *listener, void *data) {
 		const xkb_keysym_t *syms;
 		int n = xkb_state_key_get_syms(state, keycode, &syms);
 		for (int i = 0; i < n && !handled; i++) {
-			handled = handle_vt_switch(server, syms[i]);
+			handled = handle_vt_switch(server, syms[i]) || switcher_key(server, syms[i]);
 		}
 		uint32_t mods = wlr_keyboard_get_modifiers(kb->wlr_keyboard);
-		if (!handled && !server->locked && !seat_shortcuts_inhibited(server)) {
+		if (server->locked && !server->lock) {
+			idle_lock_now(server); /* the locker crashed: bring it back */
+		}
+		if (!handled && !seat_shortcuts_inhibited(server)) {
 			/* Raw (level 0) keysyms first so Mod+Shift+1 matches "1". */
 			const xkb_keysym_t *raw;
 			xkb_layout_index_t layout = xkb_state_key_get_layout(state, keycode);
 			int nr = xkb_keymap_key_get_syms_by_level(kb->wlr_keyboard->keymap, keycode,
 				layout, 0, &raw);
 			for (int i = 0; i < nr && !handled; i++) {
-				handled = binds_handle(server, mods, raw[i]);
+				if (!server->locked || is_media_key(raw[i])) {
+					handled = binds_handle(server, mods, raw[i]);
+				}
 			}
 			for (int i = 0; i < n && !handled; i++) {
-				handled = binds_handle(server, mods, syms[i]);
+				if (!server->locked || is_media_key(syms[i])) {
+					handled = binds_handle(server, mods, syms[i]);
+				}
 			}
 		}
 		if (handled) {
@@ -490,8 +510,9 @@ void input_process_motion(struct wx_server *server, uint32_t time) {
 		wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr, name);
 		wlr_seat_pointer_clear_focus(server->seat);
 	} else {
-		wlr_seat_pointer_notify_enter(server->seat, surface, sx, sy);
-		wlr_seat_pointer_notify_motion(server->seat, time, sx, sy);
+		double f = input_surface_scale(server, surface); /* X11 surfaces: device pixels */
+		wlr_seat_pointer_notify_enter(server->seat, surface, sx * f, sy * f);
+		wlr_seat_pointer_notify_motion(server->seat, time, sx * f, sy * f);
 	}
 	if (server->config.focus_follows_mouse && view && !view->unmanaged &&
 			view != server->focused && !server->pressed_buttons) {
@@ -516,7 +537,8 @@ static bool constraint_blocks_motion(struct wx_server *server, double dx, double
 		ox -= view->xdg->base->geometry.x;
 		oy -= view->xdg->base->geometry.y;
 	}
-	double tx = server->cursor->x + dx - ox, ty = server->cursor->y + dy - oy;
+	double f = input_surface_scale(server, c->surface);
+	double tx = (server->cursor->x + dx - ox) * f, ty = (server->cursor->y + dy - oy) * f;
 	return !pixman_region32_contains_point(&c->region, (int)tx, (int)ty, NULL);
 }
 
@@ -524,8 +546,10 @@ static void cursor_motion(struct wl_listener *listener, void *data) {
 	struct wx_server *server = wl_container_of(listener, server, cursor_motion);
 	struct wlr_pointer_motion_event *e = data;
 	notify_activity(server);
+	double f = input_surface_scale(server, server->seat->pointer_state.focused_surface);
 	wlr_relative_pointer_manager_v1_send_relative_motion(server->relative_pointer, server->seat,
-		(uint64_t)e->time_msec * 1000, e->delta_x, e->delta_y, e->unaccel_dx, e->unaccel_dy);
+		(uint64_t)e->time_msec * 1000, e->delta_x * f, e->delta_y * f, e->unaccel_dx * f,
+		e->unaccel_dy * f);
 	if (constraint_blocks_motion(server, e->delta_x, e->delta_y)) {
 		return;
 	}
@@ -540,8 +564,9 @@ static void cursor_motion_abs(struct wl_listener *listener, void *data) {
 	double lx, ly;
 	wlr_cursor_absolute_to_layout_coords(server->cursor, &e->pointer->base, e->x, e->y, &lx, &ly);
 	double dx = lx - server->cursor->x, dy = ly - server->cursor->y;
+	double f = input_surface_scale(server, server->seat->pointer_state.focused_surface);
 	wlr_relative_pointer_manager_v1_send_relative_motion(server->relative_pointer, server->seat,
-		(uint64_t)e->time_msec * 1000, dx, dy, dx, dy);
+		(uint64_t)e->time_msec * 1000, dx * f, dy * f, dx * f, dy * f);
 	if (constraint_blocks_motion(server, dx, dy)) {
 		return;
 	}
@@ -710,6 +735,7 @@ static struct {
 	int32_t id;
 	bool used;
 	double ox, oy;
+	double f; /* surface units per layout unit (X11 surfaces: the X screen scale) */
 } touch_points[MAX_TOUCH];
 
 /* The first finger on something without wl_touch drives the pointer instead. */
@@ -740,13 +766,14 @@ void input_add_touch(struct wx_server *server, struct wlr_input_device *device) 
 	update_caps(server);
 }
 
-static void touch_point_set(int32_t id, double ox, double oy) {
+static void touch_point_set(int32_t id, double ox, double oy, double f) {
 	for (int i = 0; i < MAX_TOUCH; i++) {
 		if (!touch_points[i].used) {
 			touch_points[i].used = true;
 			touch_points[i].id = id;
 			touch_points[i].ox = ox;
 			touch_points[i].oy = oy;
+			touch_points[i].f = f;
 			return;
 		}
 	}
@@ -773,8 +800,9 @@ static void cursor_touch_down(struct wl_listener *listener, void *data) {
 		seat_focus_view(server, tag->ptr);
 	}
 	if (surface && wlr_surface_accepts_touch(surface, server->seat)) {
-		touch_point_set(e->touch_id, lx - sx, ly - sy);
-		wlr_seat_touch_notify_down(server->seat, surface, e->time_msec, e->touch_id, sx, sy);
+		double f = input_surface_scale(server, surface);
+		touch_point_set(e->touch_id, lx - sx, ly - sy, f);
+		wlr_seat_touch_notify_down(server->seat, surface, e->time_msec, e->touch_id, sx * f, sy * f);
 		return;
 	}
 	if (emulating_touch < 0) {
@@ -819,7 +847,7 @@ static void cursor_touch_motion(struct wl_listener *listener, void *data) {
 	int i = touch_point_find(e->touch_id);
 	if (i >= 0) {
 		wlr_seat_touch_notify_motion(server->seat, e->time_msec, e->touch_id,
-			lx - touch_points[i].ox, ly - touch_points[i].oy);
+			(lx - touch_points[i].ox) * touch_points[i].f, (ly - touch_points[i].oy) * touch_points[i].f);
 	}
 }
 
@@ -850,6 +878,7 @@ static void cursor_touch_frame(struct wl_listener *listener, void *data) {
 struct wx_tool {
 	struct wlr_tablet_v2_tablet_tool *v2;
 	double ox, oy;     /* origin of the surface the tool is on */
+	double f;          /* surface units per layout unit */
 	bool emulating;    /* client lacks tablet-v2: we drive the pointer */
 	struct wl_listener destroy;
 };
@@ -865,6 +894,7 @@ static void tool_destroy(struct wl_listener *listener, void *data) {
 static struct wx_tool *tool_get(struct wx_server *server, struct wlr_tablet_tool *tool) {
 	if (!tool->data) {
 		struct wx_tool *t = calloc(1, sizeof(*t));
+		t->f = 1.0;
 		t->v2 = wlr_tablet_tool_create(server->tablet_manager, server->seat, tool);
 		t->destroy.notify = tool_destroy;
 		wl_signal_add(&tool->events.destroy, &t->destroy);
@@ -1045,8 +1075,8 @@ static void tool_position(struct wx_server *server, struct wlr_tablet *tablet, s
 	struct wlr_tablet_v2_tablet *tv2 = tablet->base.data;
 	if (t->v2->is_down && t->v2->focused_surface) {
 		/* implicit grab: keep coordinates relative to the pressed surface */
-		wlr_tablet_v2_tablet_tool_notify_motion(t->v2, server->cursor->x - t->ox,
-			server->cursor->y - t->oy);
+		wlr_tablet_v2_tablet_tool_notify_motion(t->v2, (server->cursor->x - t->ox) * t->f,
+			(server->cursor->y - t->oy) * t->f);
 		return;
 	}
 	double sx, sy;
@@ -1062,7 +1092,8 @@ static void tool_position(struct wx_server *server, struct wlr_tablet *tablet, s
 		}
 		t->ox = server->cursor->x - sx;
 		t->oy = server->cursor->y - sy;
-		wlr_tablet_v2_tablet_tool_notify_motion(t->v2, sx, sy);
+		t->f = input_surface_scale(server, surface);
+		wlr_tablet_v2_tablet_tool_notify_motion(t->v2, sx * t->f, sy * t->f);
 		wlr_cursor_set_xcursor(server->cursor, server->cursor_mgr, "default");
 		return;
 	}

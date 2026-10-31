@@ -170,6 +170,22 @@ if command -v wl-copy >/dev/null && [ -x /usr/bin/xclip ]; then
 	sleep 0.5
 	check "...and the primary selection" \
 		test "$(timeout 3 /usr/bin/xclip -o -selection primary 2>/dev/null)" = "primary-sel-321"
+	# X11-style: a background X11 client takes the clipboard with a Wayland window focused
+	printf 'bg-owner-555' | timeout 5 /usr/bin/xclip -i -selection clipboard &
+	sleep 0.8
+	check "unfocused X11 client sets the Wayland clipboard (real xclip)" \
+		test "$(timeout 3 wl-paste -n 2>/dev/null)" = "bg-owner-555"
+	check "...the content outlives the X11 owner" bash -c '! pgrep -fx "/usr/bin/xclip -i -selection clipboard" >/dev/null'
+	check "...and X11 clients read it back" \
+		test "$(timeout 3 /usr/bin/xclip -o -selection clipboard 2>/dev/null)" = "bg-owner-555"
+	printf 'bg-primary-666' | timeout 5 /usr/bin/xclip -i -selection primary &
+	sleep 0.8
+	check "...same for PRIMARY" test "$(timeout 3 wl-paste -p -n 2>/dev/null)" = "bg-primary-666"
+	head -c 3000000 /dev/urandom | base64 -w0 > "$T/big.txt"
+	timeout 10 /usr/bin/xclip -i -selection clipboard "$T/big.txt" &
+	sleep 2
+	check "...large payloads (INCR, 4 MB)" \
+		bash -c "cmp -s <(timeout 5 wl-paste -n) '$T/big.txt'"
 else
 	bad "clipboard test skipped: wl-clipboard/xclip missing"
 fi
@@ -268,18 +284,43 @@ else
 	echo "   SKIP waylandx-remote over ssh (needs sshd with key login to localhost)"
 fi
 
+echo "== idle: screens off, inhibitors, auto-lock"
+cp "$T/config.ini" "$T/config.base"
+printf '[general]\nidle_dpms = 1\nidle_lock = 0\n' >> "$T/config.ini"
+"$CTL" reload >/dev/null
+screens_on() { "$CTL" outputs | grep -q '"enabled":true'; }
+sleep 1.5
+check "screens turn off after idle_dpms" bash -c "! '$CTL' outputs | grep -q '\"enabled\":true'"
+"$CTL" mousemove_rel 1 0 >/dev/null
+check "input turns them back on" screens_on
+spawn "$BUILD/tests/probe-wl" --title inhibitor --inhibit-idle > /dev/null 2>&1
+wait_for 5 'test -n "$(id_of inhibitor)"'
+sleep 1.5
+check "a visible idle inhibitor (video player) keeps them on" screens_on
+kill "${PIDS[-1]}" 2>/dev/null || true
+sleep 1.6
+check "...and idling resumes once it is gone" bash -c "! '$CTL' outputs | grep -q '\"enabled\":true'"
+"$CTL" mousemove_rel -1 0 >/dev/null
+cp "$T/config.base" "$T/config.ini"
+
 echo "== session lock (ext-session-lock-v1)"
 if command -v swaylock >/dev/null; then
-	spawn swaylock -c 202020
+	printf '[general]\nidle_lock = 1\nidle_dpms = 0\nlock_command = swaylock -c 202020\n' >> "$T/config.ini"
+	"$CTL" reload >/dev/null
 	wait_for 5 '"$CTL" status | grep -q "\"locked\":true"'
-	check "swaylock locks the session" bash -c "'$CTL' status | grep -q '\"locked\":true'"
+	check "idle_lock starts swaylock and locks the session" bash -c "'$CTL' status | grep -q '\"locked\":true'"
 	: > "$T/beta.txt"
 	"$CTL" type "secret" >/dev/null
 	sleep 0.3
 	check "keys do not reach normal windows while locked" bash -c "! grep -aq 'key s down' '$T/beta.txt'"
-	kill "${PIDS[-1]}" 2>/dev/null || true
+	pkill -f "^swaylock -c 202020" || true
 	sleep 0.5
 	check "a crashed locker leaves the session locked" bash -c "'$CTL' status | grep -q '\"locked\":true'"
+	sleep 3 # the relaunch guard
+	"$CTL" lock >/dev/null
+	wait_for 5 'pgrep -f "^swaylock -c 202020" >/dev/null'
+	check "'lock' brings a crashed locker back" pgrep -f "^swaylock -c 202020"
+	pkill -f "^swaylock -c 202020" || true
 else
 	echo "   SKIP swaylock not installed"
 fi

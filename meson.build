@@ -1,5 +1,5 @@
 project('waylandx', 'c',
-  version: '0.2.0',
+  version: '0.3.0',
   license: 'MIT',
   meson_version: '>=0.60.0',
   default_options: ['c_std=c11', 'warning_level=2', 'werror=false', 'buildtype=debugoptimized'])
@@ -26,6 +26,10 @@ xcb_icccm = dependency('xcb-icccm')
 cairo = dependency('cairo')
 pangocairo = dependency('pangocairo')
 math = meson.get_compiler('c').find_library('m')
+sdbus = dependency('libsystemd', required: false)
+if not sdbus.found()
+  sdbus = dependency('libelogind', required: false)
+endif
 
 wl_protocol_dir = wayland_protos.get_variable('pkgdatadir')
 scanner = find_program(dependency('wayland-scanner', native: true).get_variable('wayland_scanner'))
@@ -39,6 +43,8 @@ protocols = {
   'waylandx-unstable-v1': 'protocol/waylandx-unstable-v1.xml',
   'text-input-unstable-v3': wl_protocol_dir / 'unstable/text-input/text-input-unstable-v3.xml',
   'input-method-unstable-v2': 'protocol/input-method-unstable-v2.xml',
+  'xdg-output-unstable-v1': wl_protocol_dir / 'unstable/xdg-output/xdg-output-unstable-v1.xml',
+  'idle-inhibit-unstable-v1': wl_protocol_dir / 'unstable/idle-inhibit/idle-inhibit-unstable-v1.xml',
 }
 
 server_proto = {}
@@ -59,24 +65,38 @@ server_srcs = files(
   'src/xwayland.c', 'src/layer.c', 'src/view.c', 'src/deco.c', 'src/layout.c',
   'src/workspace.c', 'src/config.c', 'src/ipc.c', 'src/ipc_cmd.c',
   'src/inject.c', 'src/capture.c', 'src/wxproto.c', 'src/rules.c', 'src/json.c',
-  'src/protocols.c', 'src/lock.c', 'src/ime.c', 'src/x11clip.c')
+  'src/protocols.c', 'src/lock.c', 'src/ime.c', 'src/x11clip.c',
+  'src/xwlscale.c', 'src/idle.c',
+  'src/logind.c', 'src/nightlight.c',
+  'src/switcher.c')
 
-executable('waylandx', server_srcs,
+wx_exe = executable('waylandx', server_srcs,
   server_proto['xdg-shell'], server_proto['wlr-layer-shell-unstable-v1'],
   server_proto['wlr-output-power-management-unstable-v1'],
-  server_proto['waylandx-unstable-v1'],
+  server_proto['waylandx-unstable-v1'], server_proto['xdg-output-unstable-v1'],
   include_directories: include_directories('src'),
   dependencies: [wlroots, wayland_server, xkbcommon, libinput, pixman, xcb, xcb_icccm,
-    cairo, pangocairo, math],
+    cairo, pangocairo, math, sdbus],
+  c_args: sdbus.found() ? ['-DWX_HAVE_SDBUS'] : [],
   install: true)
 
-executable('waylandxctl', 'ctl/waylandxctl.c', install: true)
+ctl_exe = executable('waylandxctl', 'ctl/waylandxctl.c', install: true)
 
-executable('waylandx-panel', 'panel/panel.c', 'panel/launcher.c',
+rsvg = dependency('librsvg-2.0', required: false)
+panel_args = []
+if sdbus.found()
+  panel_args += '-DWX_HAVE_SDBUS'
+endif
+if rsvg.found()
+  panel_args += '-DWX_HAVE_RSVG'
+endif
+panel_exe = executable('waylandx-panel', 'panel/panel.c', 'panel/launcher.c', 'panel/icons.c',
+  'panel/notify.c', 'panel/status.c', 'panel/tray.c', 'panel/winswitch.c',
   client_proto['xdg-shell'], client_proto['wlr-layer-shell-unstable-v1'],
   client_proto['wlr-foreign-toplevel-management-unstable-v1'],
   client_proto['ext-workspace-v1'],
-  dependencies: [wayland_client, xkbcommon, cairo, pangocairo],
+  dependencies: [wayland_client, xkbcommon, cairo, pangocairo, sdbus, rsvg, math],
+  c_args: panel_args,
   install: true)
 
 install_data('session/waylandx-remote', 'session/waylandx-session',
@@ -87,9 +107,10 @@ install_data('config/default.ini', install_dir: get_option('datadir') / 'wayland
 
 subdir('tests')
 
-foreach e2e : ['headless', 'multihead']
+foreach e2e : ['headless', 'multihead', 'hidpi', 'session', 'desktop']
   test(e2e + '-e2e', find_program('tests/run-' + e2e + '.sh'),
     args: [meson.project_build_root()],
+    depends: [wx_exe, ctl_exe, panel_exe] + e2e_helpers,
     timeout: 300,
     is_parallel: false)
 endforeach

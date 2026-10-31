@@ -72,14 +72,36 @@ bool server_reload(struct wx_server *server, char **err) {
 	wlr_log(WLR_INFO, "config reloaded from %s", server->config_path);
 	apply_mod(server);
 	binds_reload(server);
+	idle_rearm(server);
+	logind_apply_config(server);
+	nightlight_update(server);
 	input_apply_config(server);
 	outputs_apply_config(server);
+	xwayland_update_scale(server);
 	struct wx_view *view;
 	wl_list_for_each(view, &server->views, link) {
 		deco_update(view);
 	}
 	layout_arrange(server);
 	return true;
+}
+
+/*
+ * Autostart and -s. When Xwayland starts with the session (HiDPI), they wait
+ * until its window manager is up: an X11 app that maps a window before that
+ * would never be managed.
+ */
+void server_autostart(struct wx_server *server) {
+	if (server->autostarted) {
+		return;
+	}
+	server->autostarted = true;
+	for (size_t i = 0; i < server->config.autostart_len; i++) {
+		server_spawn(server, server->config.autostart[i]);
+	}
+	if (server->startup_cmd) {
+		server_spawn(server, server->startup_cmd);
+	}
 }
 
 static int handle_sighup(int sig, void *data) {
@@ -247,6 +269,9 @@ int main(int argc, char *argv[]) {
 	protocols_init(&server);
 	wxproto_init(&server);
 	lock_init(&server);
+	idle_init(&server);
+	logind_init(&server);
+	nightlight_init(&server);
 
 	server.socket = wl_display_add_socket_auto(server.display);
 	if (!server.socket) {
@@ -286,23 +311,30 @@ int main(int argc, char *argv[]) {
 		server.mod_mask == WLR_MODIFIER_ALT ? "Alt" :
 		server.mod_mask == WLR_MODIFIER_CTRL ? "Ctrl" : "Super");
 
-	for (size_t i = 0; i < server.config.autostart_len; i++) {
-		server_spawn(&server, server.config.autostart[i]);
-	}
-	if (startup_cmd) {
-		server_spawn(&server, startup_cmd);
-	}
+	server.startup_cmd = startup_cmd;
+	if (!server.xwayland_waiting) {
+		server_autostart(&server);
+	} /* else xwayland_ready runs it */
 
 	wl_display_run(server.display);
 
 	wlr_log(WLR_INFO, "shutting down");
 	ipc_finish(&server);
-	wl_display_destroy_clients(server.display);
 	remove_listeners(&server);
+	/* Xwayland first: destroying its client below would make wlroots restart it */
 	if (server.xwayland) {
+		x11clip_finish(&server);
 		wlr_xwayland_destroy(server.xwayland);
+		server.xwayland = NULL;
 	}
+	wl_display_destroy_clients(server.display);
 	inject_finish(&server);
+	if (server.xwayland_timer) {
+		wl_event_source_remove(server.xwayland_timer);
+	}
+	idle_finish(&server);
+	logind_finish(&server);
+	nightlight_finish(&server);
 	wl_event_source_remove(server.sighup_source);
 	wl_event_source_remove(server.sigterm_source);
 	wl_event_source_remove(server.sigint_source);

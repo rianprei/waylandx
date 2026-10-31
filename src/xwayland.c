@@ -28,14 +28,35 @@ static bool client_chose_position(struct wlr_xwayland_surface *xs) {
 	return xs->x != 0 || xs->y != 0;
 }
 
+/* X11 screen pixels -> layout box (see xwlscale.c) */
+static void box_from_x11(struct wx_view *view) {
+	struct wx_server *server = view->server;
+	struct wlr_xwayland_surface *xs = view->xsurface;
+	view->x = xwl_from_x11(server, xs->x);
+	view->y = xwl_from_x11(server, xs->y);
+	view->w = xwl_from_x11(server, xs->width);
+	view->h = xwl_from_x11(server, xs->height);
+}
+
+/* Tells the X11 client its geometry, converted to X11 screen pixels. */
+void xwayland_configure(struct wx_view *view) {
+	struct wx_server *server = view->server;
+	int x = xwl_to_x11(server, view->x), y = xwl_to_x11(server, view->y);
+	int w = xwl_to_x11(server, view->x + view->w) - x, h = xwl_to_x11(server, view->y + view->h) - y;
+	wlr_xwayland_surface_configure(view->xsurface, (int16_t)x, (int16_t)y,
+		(uint16_t)(w > 0 ? w : 1), (uint16_t)(h > 0 ? h : 1));
+}
+
+static void xsurface_commit(struct wl_listener *listener, void *data) {
+	struct wx_view *view = wl_container_of(listener, view, commit);
+	xwayland_scale_content(view);
+}
+
 static void unmanaged_map(struct wx_view *view) {
 	struct wx_server *server = view->server;
 	struct wlr_xwayland_surface *xs = view->xsurface;
 	view->mapped = true;
-	view->x = xs->x;
-	view->y = xs->y;
-	view->w = xs->width;
-	view->h = xs->height;
+	box_from_x11(view);
 	wlr_scene_node_reparent(&view->tree->node, server->unmanaged);
 	wlr_scene_node_set_position(&view->tree->node, view->x, view->y);
 	wlr_scene_node_set_enabled(&view->tree->node, true);
@@ -50,18 +71,22 @@ static void xsurface_map(struct wl_listener *listener, void *data) {
 	struct wx_view *view = wl_container_of(listener, view, map);
 	struct wlr_xwayland_surface *xs = view->xsurface;
 	view->content = wlr_scene_subsurface_tree_create(view->tree, xs->surface);
+	/* after the scene's own commit listener, so our size wins */
+	view->commit.notify = xsurface_commit;
+	wl_signal_add(&xs->surface->events.commit, &view->commit);
+	xwayland_scale_content(view);
 	if (view->unmanaged) {
 		unmanaged_map(view);
 		return;
 	}
-	view->w = xs->width;
-	view->h = xs->height;
+	view->w = xwl_from_x11(view->server, xs->width);
+	view->h = xwl_from_x11(view->server, xs->height);
 	view->ssd = wants_ssd(xs);
 	if (client_chose_position(xs)) {
 		/* X11 freedom: the window lands exactly where the app asked */
 		view->has_req_pos = true;
-		view->req_x = xs->x;
-		view->req_y = xs->y;
+		view->req_x = xwl_from_x11(view->server, xs->x);
+		view->req_y = xwl_from_x11(view->server, xs->y);
 	}
 	view_map(view);
 }
@@ -69,6 +94,10 @@ static void xsurface_map(struct wl_listener *listener, void *data) {
 static void xsurface_unmap(struct wl_listener *listener, void *data) {
 	struct wx_view *view = wl_container_of(listener, view, unmap);
 	view_unmap(view);
+	if (view->commit.link.next) {
+		wl_list_remove(&view->commit.link);
+		view->commit.link.next = NULL;
+	}
 	if (view->content) {
 		wlr_scene_node_destroy(&view->content->node);
 		view->content = NULL;
@@ -111,28 +140,24 @@ static void xsurface_request_configure(struct wl_listener *listener, void *data)
 	}
 	if (view->fullscreen || view->maximized || view_is_tiled(view)) {
 		/* managed geometry wins; tell the client where it really is */
-		wlr_xwayland_surface_configure(xs, (int16_t)view->x, (int16_t)view->y,
-			(uint16_t)view->w, (uint16_t)view->h);
+		xwayland_configure(view);
 		return;
 	}
-	int x = (ev->mask & XCB_CONFIG_WINDOW_X) ? ev->x : view->x;
-	int y = (ev->mask & XCB_CONFIG_WINDOW_Y) ? ev->y : view->y;
-	int w = (ev->mask & XCB_CONFIG_WINDOW_WIDTH) ? ev->width : view->w;
-	int h = (ev->mask & XCB_CONFIG_WINDOW_HEIGHT) ? ev->height : view->h;
+	struct wx_server *server = view->server;
+	int x = (ev->mask & XCB_CONFIG_WINDOW_X) ? xwl_from_x11(server, ev->x) : view->x;
+	int y = (ev->mask & XCB_CONFIG_WINDOW_Y) ? xwl_from_x11(server, ev->y) : view->y;
+	int w = (ev->mask & XCB_CONFIG_WINDOW_WIDTH) ? xwl_from_x11(server, ev->width) : view->w;
+	int h = (ev->mask & XCB_CONFIG_WINDOW_HEIGHT) ? xwl_from_x11(server, ev->height) : view->h;
 	view_set_box(view, x, y, w, h);
 	ipc_event_window(view->server, "geometry", view);
 }
 
 static void xsurface_set_geometry(struct wl_listener *listener, void *data) {
 	struct wx_view *view = wl_container_of(listener, view, set_geometry);
-	struct wlr_xwayland_surface *xs = view->xsurface;
 	if (!view->mapped || !view->unmanaged) {
 		return;
 	}
-	view->x = xs->x;
-	view->y = xs->y;
-	view->w = xs->width;
-	view->h = xs->height;
+	box_from_x11(view);
 	wlr_scene_node_set_position(&view->tree->node, view->x, view->y);
 }
 
@@ -328,6 +353,7 @@ static void new_xsurface(struct wl_listener *listener, void *data) {
 static void xwayland_ready(struct wl_listener *listener, void *data) {
 	struct wx_server *server = wl_container_of(listener, server, xwayland_ready);
 	wlr_xwayland_set_seat(server->xwayland, server->seat);
+	xwayland_scale_ready(server);
 	layers_update_xwayland_workareas(server);
 	struct wlr_xcursor *xc = wlr_xcursor_manager_get_xcursor(server->cursor_mgr, "default", 1);
 	if (xc && xc->image_count > 0) {
@@ -336,10 +362,34 @@ static void xwayland_ready(struct wl_listener *listener, void *data) {
 			img->hotspot_x, img->hotspot_y);
 	}
 	wlr_log(WLR_INFO, "Xwayland ready on DISPLAY=%s", server->xwayland->display_name);
+	if (server->xwayland_waiting) {
+		server->xwayland_waiting = false;
+		server_autostart(server);
+	}
+}
+
+static int xwayland_late(void *data) {
+	struct wx_server *server = data;
+	if (server->xwayland_waiting) {
+		wlr_log(WLR_ERROR, "Xwayland is not up after 5s; starting the session without it");
+		server->xwayland_waiting = false;
+		server_autostart(server);
+	}
+	return 0;
 }
 
 void xwayland_init(struct wx_server *server) {
-	server->xwayland = wlr_xwayland_create(server->display, server->compositor, true);
+	/* With HiDPI, start Xwayland now so Xft.dpi is published before any X11 app reads it. */
+	xwayland_update_scale(server);
+	bool lazy = xwayland_scale(server) <= 1.0;
+	server->xwayland = wlr_xwayland_create(server->display, server->compositor, lazy);
+	server->xwayland_waiting = server->xwayland && !lazy;
+	if (server->xwayland_waiting) {
+		/* never hold the session hostage to a broken Xwayland */
+		struct wl_event_source *t = wl_event_loop_add_timer(server->loop, xwayland_late, server);
+		wl_event_source_timer_update(t, 5000);
+		server->xwayland_timer = t;
+	}
 	if (!server->xwayland) {
 		wlr_log(WLR_ERROR, "cannot start Xwayland; X11 apps disabled");
 		return;

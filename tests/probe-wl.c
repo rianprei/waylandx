@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <wayland-client.h>
 #include <xkbcommon/xkbcommon.h>
+#include "idle-inhibit-unstable-v1-client-protocol.h"
 #include "text-input-unstable-v3-client-protocol.h"
 #include "waylandx-unstable-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
@@ -18,6 +19,7 @@ static struct wl_shm *shm;
 static struct xdg_wm_base *wm_base;
 static struct wl_seat *seat;
 static struct wx_manager_v1 *wx_manager;
+static struct zwp_idle_inhibit_manager_v1 *inhibit_manager;
 static struct zwp_text_input_manager_v3 *ti_manager;
 static struct zwp_text_input_v3 *text_input;
 static bool want_text_input;
@@ -277,6 +279,8 @@ static void reg_global(void *data, struct wl_registry *r, uint32_t name, const c
 		wl_seat_add_listener(seat, &seat_listener, NULL);
 	} else if (!strcmp(iface, zwp_text_input_manager_v3_interface.name)) {
 		ti_manager = wl_registry_bind(r, name, &zwp_text_input_manager_v3_interface, 1);
+	} else if (!strcmp(iface, zwp_idle_inhibit_manager_v1_interface.name)) {
+		inhibit_manager = wl_registry_bind(r, name, &zwp_idle_inhibit_manager_v1_interface, 1);
 	} else if (!strcmp(iface, wx_manager_v1_interface.name)) {
 		wx_manager = wl_registry_bind(r, name, &wx_manager_v1_interface, 1);
 	}
@@ -290,7 +294,7 @@ static const struct wl_registry_listener reg_listener = {.global = reg_global,
 
 int main(int argc, char *argv[]) {
 	const char *title = "probe-wl";
-	bool want_pos = false, want_above = false;
+	bool want_pos = false, want_above = false, want_inhibit = false;
 	int px = 0, py = 0;
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--title") && i + 1 < argc) {
@@ -306,6 +310,8 @@ int main(int argc, char *argv[]) {
 			want_text_input = true;
 		} else if (!strcmp(argv[i], "--above")) {
 			want_above = true;
+		} else if (!strcmp(argv[i], "--inhibit-idle")) {
+			want_inhibit = true;
 		} else if (!strcmp(argv[i], "--color") && i + 1 < argc) {
 			color = (uint32_t)strtoul(argv[++i], NULL, 16);
 		}
@@ -345,6 +351,9 @@ int main(int argc, char *argv[]) {
 		if (want_above) {
 			wx_toplevel_control_v1_set_layer(ctl, WX_TOPLEVEL_CONTROL_V1_LAYER_ABOVE);
 		}
+	}
+	if (want_inhibit && inhibit_manager) {
+		zwp_idle_inhibit_manager_v1_create_inhibitor(inhibit_manager, surface);
 	}
 	wl_surface_commit(surface);
 	while (running && wl_display_dispatch(display) != -1) {

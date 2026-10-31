@@ -22,6 +22,7 @@ Construído em C11 sobre wlroots 0.20. Apps X11 rodam via Xwayland rootless, ger
 | Ponteiro relativo e travado (jogos), gestos de touchpad | relative-pointer, pointer-constraints, pointer-gestures |
 | Mesa digitalizadora, touchscreen, métodos de entrada (IME) | tablet-v2, wl_touch, text-input-v3 + input-method-v2 |
 | Lock de tela seguro | ext-session-lock (swaylock etc.); locker que trava mantém a tela bloqueada |
+| Apps X11 nítidos em HiDPI | o X11 renderiza na maior escala dos monitores, com `Xft.dpi` publicado, como no KWin |
 
 | Do X11 (agora também para apps Wayland) | Como |
 |---|---|
@@ -31,11 +32,24 @@ Construído em C11 sobre wlroots 0.20. Apps X11 rodam via Xwayland rootless, ger
 | Automação de input (xdotool) | `waylandxctl type/key/click/mousemove`, virtual-keyboard/pointer abertos, shim `xdotool` |
 | Introspecção e controle (wmctrl/xprop) | `waylandxctl list/info/move/close…`, shims `wmctrl`, foreign-toplevel |
 | Atalhos globais para qualquer programa | `waylandxctl bind COMBO CMD` |
-| Clipboard acessível de qualquer lugar | apps X11 em segundo plano conseguem ler; data-control (wl-clipboard); shims `xclip`/`xsel` |
+| Clipboard acessível de qualquer lugar | apps X11 em segundo plano leem **e definem** o clipboard (o conteúdo sobrevive ao app); data-control (wl-clipboard); shims `xclip`/`xsel` |
 | Rodar app remoto com janela local (ssh -X) | `waylandx-remote host app` (waypipe), `ssh -X` via Xwayland |
 | WM tradicional: flutuante, decorações, arrastar com Mod | decorações desenhadas pelo servidor, Mod+arrastar, snap; tiling opcional |
 | Tampa do notebook / dock | fechar a tampa desliga a tela interna quando há monitor externo |
 | Política aberta | qualquer cliente local pode capturar e injetar; só o socket IPC é restrito ao seu usuário (0600) |
+| Teclas injetadas acionam atalhos do WM (XTest) | `waylandxctl keydown alt; key Tab` faz Alt+Tab, como o `xdotool` no X11 |
+
+| O que um desktop completo (KDE/GNOME) oferece | Como |
+|---|---|
+| Notificações | o `waylandx-panel` é o servidor de notificações freedesktop: ícones, markup, ações; as críticas ficam na tela |
+| Bandeja do sistema | StatusNotifierItem + menus DBusMenu (Discord, Steam, KDE Connect, nm-applet…) |
+| Volume, rede e bateria na barra | PipeWire (`wpctl`), NetworkManager, sysfs; clique ou role para mudar |
+| OSD de volume e brilho, teclas de mídia | funcionam sem configurar, inclusive na tela de bloqueio; brilho via logind (sem root) |
+| Seletor Alt+Tab | segure Alt (ou Mod), navegue com Tab na ordem de uso, solte para trocar |
+| Bloqueio e tela desligada por inatividade | embutido; players de vídeo e jogos que inibem o idle pausam |
+| Bloquear antes de suspender, `loginctl lock-session` | inibidor do logind, liberado quando o locker aparece |
+| Luz noturna | `night_light = 20:00-07:00`, transição de 30 minutos, gamma do hardware |
+| Ícones dos apps | na lista de tarefas, notificações, bandeja e Alt+Tab, do seu tema de ícones |
 
 ## Compilar e testar
 
@@ -48,10 +62,18 @@ ninja -C build
 meson test -C build
 ```
 
-O `meson test` roda os testes unitários e duas suítes de ponta a ponta sem tela (`tests/run-headless.sh` e
-`tests/run-multihead.sh`). Elas usam clientes Wayland e X11 de verdade para testar injeção de input, IME,
-screenshots, regras, shims, clipboard, workspaces em dois monitores, tiling, painel, waypipe, lock e reload
-de config. O CI roda tudo normalmente e com ASan/UBSan.
+O `meson test` roda os testes unitários e cinco suítes de ponta a ponta sem tela, com clientes Wayland e
+X11 de verdade:
+
+- `run-headless.sh`: injeção de input, IME, screenshots, regras, shims, clipboard nos dois sentidos,
+  tiling, painel, waypipe, idle e lock, reload de config;
+- `run-multihead.sh`: workspaces por monitor, hotplug, tampa do notebook;
+- `run-hidpi.sh`: X11 nítido em monitor escala 2, mapeamento de input, screenshots em resolução nativa;
+- `run-session.sh`: bloquear antes de suspender, lock-session, brilho e MPRIS contra um logind falso;
+- `run-desktop.sh`: notificações, OSD, Alt+Tab, itens da bandeja e seus menus num D-Bus privado.
+
+O CI roda tudo normalmente e com ASan/UBSan. Nada mexe na sua sessão real: as suítes de D-Bus usam um
+barramento privado, um `wpctl` falso e um backlight falso.
 
 ## Rodar
 
@@ -88,12 +110,14 @@ Depois escolha "WaylandX" no SDDM, ou rode `waylandx-session` a partir de um TTY
 | Mod+Espaço | flutuante ⇄ tiling para a janela |
 | Mod+T | liga/desliga tiling no workspace |
 | Mod+A / Mod+S | sempre no topo / em todos os workspaces |
-| Mod+Tab | alterna janelas |
+| Alt+Tab / Mod+Tab (+Shift) | seletor de janelas: segure, navegue com Tab, solte |
 | Mod+←/→, Mod+↑/↓ | meia tela, maximizar/restaurar |
 | Mod+1..9, Mod+Shift+1..9 | trocar de workspace neste monitor / mover janela |
 | Mod+H / Mod+L | diminuir/aumentar a área master |
 | Print / Mod+Shift+S | screenshot da tela / da janela |
 | Mod+Shift+R / Mod+Shift+E | recarregar config / sair |
+| Ctrl+Alt+L | bloquear a tela |
+| Teclas de volume, brilho e play/pause/próxima/anterior | embutidas, com OSD |
 | Mod+arrastar (esq./dir.) | mover / redimensionar de qualquer ponto da janela |
 
 ## waylandxctl
@@ -110,6 +134,10 @@ waylandxctl mousemove 500 300; waylandxctl click 1 2   # botões no padrão X11 
 waylandxctl screenshot ~/tela.png [-o DP-1 | -w 3 | -r 0,0,800,600]
 waylandxctl bind super+F1 notify-send oi   # atalho global que dispara um comando
 waylandxctl subscribe                      # stream de eventos JSON
+waylandxctl lock; waylandxctl screens off  # bloquear agora / telas desligadas até o próximo input
+waylandxctl brightness +5%                 # volume up|down|mute, media play-pause|next…
+waylandxctl nightlight on                  # on|off|auto (auto segue night_light)
+waylandxctl switch next                    # Alt+Tab a partir de scripts
 waylandxctl help
 ```
 
@@ -153,9 +181,14 @@ src/inject.c      injeção de teclado/mouse (keymap gerado na hora)
 src/capture.c     screenshots
 src/wxproto.c     protocolo waylandx-unstable-v1
 src/protocols.c   demais protocolos Wayland
-src/x11clip.c     leitura do clipboard por apps X11 sem foco
+src/x11clip.c     clipboard X11 nos dois sentidos, sem foco
+src/xwlscale.c    X11 nítido em HiDPI (tela X escalada, xdg-output só para o Xwayland, Xft.dpi)
 src/lock.c        ext-session-lock
-panel/            waylandx-panel (uma barra por monitor + launcher)
+src/idle.c        bloqueio e telas desligadas por inatividade
+src/logind.c      bloquear antes de suspender, lock-session, brilho, MPRIS
+src/nightlight.c  luz noturna
+src/switcher.c    Alt+Tab
+panel/            waylandx-panel: barras, launcher, notificações, bandeja, status, OSD, Alt+Tab
 ctl/              waylandxctl
 shims/            xdotool, wmctrl, xclip, xsel
 session/          waylandx-session, waylandx-remote, .desktop, configs de portal
@@ -164,8 +197,10 @@ tests/            unitários, probes Wayland/X11/IME, suítes e2e sem tela
 
 ## Limites conhecidos
 
-- **Apps X11 em monitores com escala > 1** são ampliados (ficam borrados). O wlroots 0.20 não tem API de escala para o Xwayland.
-- **Um app X11 sem foco virando dono do clipboard** (por exemplo, o `xclip -i` de verdade rodado num terminal Wayland) é ignorado pelo wlroots; para isso use os shims `xclip`/`xsel`. Ler o clipboard a partir de apps X11 em segundo plano funciona, e copiar de um app X11 focado funciona normalmente.
+- **Apps X11 que ignoram o `Xft.dpi`** (Xlib/Motif antigos) ficam pequenos em HiDPI com o padrão `xwayland_scale = auto`; use `xwayland_scale = 1` para esticá-los. O cursor dos apps X11 sai no tamanho certo, mas não em resolução cheia.
+- **A luz noturna** precisa da tabela de gamma do hardware (qualquer monitor real via DRM) ou do renderizador Vulkan; sessões aninhadas com GLES2 ficam sem o tom.
+- **Os menus da bandeja** são só de mouse (sem navegação por teclado ainda); submenus abrem no lugar do menu pai.
+- **As notificações** não têm painel de histórico nem imagens dentro do texto.
 - **Botões da mesa digitalizadora** se associam à última mesa conectada (funciona com uma mesa; várias mesas ao mesmo tempo não são diferenciadas).
 - **Ainda não testado em hardware real:** sessão TTY/DRM, VRR e tearing em monitor físico, multi-monitor físico, touchscreen e mesa digitalizadora. As suítes rodam sem tela e aninhadas; o código de touch e de mesa compila, mas não foi exercitado por um dispositivo real.
 

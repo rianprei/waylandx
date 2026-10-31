@@ -17,8 +17,9 @@ jobs:
         run: |
           pacman -Syu --noconfirm --needed base-devel git meson ninja pkgconf \
             wlroots0.20 wayland wayland-protocols libxkbcommon libinput pixman \
-            libxcb xcb-util-wm cairo pango xorg-xwayland \
-            xclip wl-clipboard waypipe file ttf-dejavu
+            libxcb xcb-util-wm cairo pango xorg-xwayland systemd-libs librsvg \
+            xclip wl-clipboard waypipe file ttf-dejavu xdotool swaylock \
+            xorg-xdpyinfo xorg-xrandr xorg-xrdb dbus libnotify glib2
       - uses: actions/checkout@v6
       - name: Configure
         run: |

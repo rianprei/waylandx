@@ -213,8 +213,7 @@ void view_raise(struct wx_view *view) {
 
 static void xw_configure(struct wx_view *view) {
 	if (view->type == WX_VIEW_XWAYLAND) {
-		wlr_xwayland_surface_configure(view->xsurface, (int16_t)view->x, (int16_t)view->y,
-			(uint16_t)(view->w > 0 ? view->w : 1), (uint16_t)(view->h > 0 ? view->h : 1));
+		xwayland_configure(view);
 	}
 }
 

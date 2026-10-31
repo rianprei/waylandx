@@ -54,6 +54,7 @@ struct wx_config {
 	uint32_t color_background;
 	bool focus_follows_mouse;
 	bool xwayland;
+	double xwayland_scale; /* 0 = auto (largest output scale) */
 	bool snap;
 	int snap_threshold;
 	bool lid_disable_internal;  /* closing the lid turns the built-in panel off */
@@ -61,6 +62,12 @@ struct wx_config {
 	char *cursor_theme;
 	int cursor_size;
 	char *screenshot_dir;
+	int idle_lock;              /* seconds idle before locking, 0 = never */
+	int idle_dpms;              /* seconds idle before screens off, 0 = never */
+	char *lock_command;
+	bool lock_on_sleep;         /* lock before suspend (logind) */
+	char *night_light;          /* off | on | HH:MM-HH:MM */
+	int night_temp;             /* Kelvin at night */
 
 	/* [input] */
 	char *kb_layout, *kb_variant, *kb_options, *kb_model, *kb_rules;

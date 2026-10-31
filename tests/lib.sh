@@ -37,7 +37,7 @@ wx_start() { # wx_start NUM_OUTPUTS
 	echo "== starting WaylandX headless with $1 output(s) (logs: $T/server.log)"
 	env -u WAYLAND_DISPLAY -u DISPLAY -u WAYLANDX_SOCK \
 		WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_HEADLESS_OUTPUTS="$1" WLR_LIBINPUT_NO_DEVICES=1 \
-		"$BUILD/waylandx" -c "$T/config.ini" > "$T/server.log" 2>&1 &
+		"$BUILD/waylandx" ${WX_DEBUG:+-d} -c "$T/config.ini" > "$T/server.log" 2>&1 &
 	WX_PID=$!
 	local line=""
 	for _ in $(seq 50); do
@@ -46,6 +46,10 @@ wx_start() { # wx_start NUM_OUTPUTS
 		sleep 0.1
 	done
 	export WAYLANDX_SOCK=${line#IPC listening on }
+	# Xwayland started with the session (HiDPI): clients wait for its WM, like autostart does
+	if grep -q "Starting Xwayland" "$T/server.log"; then
+		wait_for 10 'grep -q "Xwayland ready" "$T/server.log"'
+	fi
 	check "IPC socket is up and answers ping" "$CTL" ping
 	local status
 	status=$("$CTL" status)

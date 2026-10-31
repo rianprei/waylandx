@@ -49,6 +49,12 @@ void config_defaults(struct wx_config *c) {
 	c->snap_threshold = 12;
 	c->lid_disable_internal = true;
 	c->cursor_size = 24;
+	c->idle_lock = 300;
+	c->idle_dpms = 600;
+	c->lock_on_sleep = true;
+	c->night_light = xstrdup("off");
+	c->night_temp = 4000;
+	c->lock_command = xstrdup("swaylock -f -c 1e2128");
 	c->repeat_rate = 25;
 	c->repeat_delay = 600;
 	c->natural_scroll = -1;
@@ -64,6 +70,8 @@ void config_free(struct wx_config *c) {
 	free(c->font);
 	free(c->cursor_theme);
 	free(c->screenshot_dir);
+	free(c->lock_command);
+	free(c->night_light);
 	free(c->internal_output);
 	free(c->kb_layout);
 	free(c->kb_variant);
@@ -225,6 +233,13 @@ static bool parse_general(struct parse_ctx *p, const char *k, const char *v) {
 		WANT(config_parse_bool(v, &c->focus_follows_mouse), "boolean");
 	} else if (!strcmp(k, "xwayland")) {
 		WANT(config_parse_bool(v, &c->xwayland), "boolean");
+	} else if (!strcmp(k, "xwayland_scale")) {
+		if (!strcasecmp(v, "auto")) {
+			c->xwayland_scale = 0;
+		} else {
+			WANT(parse_double(v, &c->xwayland_scale) && c->xwayland_scale >= 1 &&
+				c->xwayland_scale <= 4, "xwayland_scale (auto or 1-4)");
+		}
 	} else if (!strcmp(k, "snap")) {
 		WANT(config_parse_bool(v, &c->snap), "boolean");
 	} else if (!strcmp(k, "lid_close")) {
@@ -240,6 +255,24 @@ static bool parse_general(struct parse_ctx *p, const char *k, const char *v) {
 		WANT(parse_int(v, &c->cursor_size) && c->cursor_size > 0, "integer");
 	} else if (!strcmp(k, "screenshot_dir")) {
 		set_str(&c->screenshot_dir, v);
+	} else if (!strcmp(k, "idle_lock")) {
+		WANT(parse_int(v, &c->idle_lock) && c->idle_lock >= 0, "seconds");
+	} else if (!strcmp(k, "idle_dpms")) {
+		WANT(parse_int(v, &c->idle_dpms) && c->idle_dpms >= 0, "seconds");
+	} else if (!strcmp(k, "lock_command")) {
+		set_str(&c->lock_command, v);
+	} else if (!strcmp(k, "night_light")) {
+		int h1, m1, h2, m2;
+		WANT(!strcmp(v, "off") || !strcmp(v, "on") ||
+			(sscanf(v, "%d:%d-%d:%d", &h1, &m1, &h2, &m2) == 4 && h1 >= 0 && h1 < 24 &&
+			h2 >= 0 && h2 < 24 && m1 >= 0 && m1 < 60 && m2 >= 0 && m2 < 60),
+			"night_light (off|on|HH:MM-HH:MM)");
+		set_str(&c->night_light, v);
+	} else if (!strcmp(k, "night_temp")) {
+		WANT(parse_int(v, &c->night_temp) && c->night_temp >= 1000 && c->night_temp <= 6500,
+			"night_temp (1000-6500)");
+	} else if (!strcmp(k, "lock_on_sleep")) {
+		WANT(config_parse_bool(v, &c->lock_on_sleep), "boolean");
 	} else {
 		fprintf(stderr, "waylandx: config line %d: unknown key '%s' in [general]\n", p->line, k);
 	}

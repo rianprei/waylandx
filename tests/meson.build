@@ -12,12 +12,26 @@ test_layout = executable('test_layout', 'test_layout.c', '../src/layout.c',
   dependencies: [wlroots, wayland_server, xkbcommon])
 test('layout', test_layout)
 
-executable('probe-wl', 'probe-wl.c',
+test_nightlight = executable('test_nightlight', 'test_nightlight.c', '../src/nightlight.c',
+  include_directories: include_directories('../src'),
+  dependencies: [wlroots, wayland_server, xkbcommon, pixman, math])
+test('nightlight', test_nightlight)
+
+e2e_helpers = []
+e2e_helpers += executable('probe-wl', 'probe-wl.c',
   client_proto['xdg-shell'], client_proto['waylandx-unstable-v1'],
-  client_proto['text-input-unstable-v3'],
+  client_proto['text-input-unstable-v3'], client_proto['idle-inhibit-unstable-v1'],
   dependencies: [wayland_client, xkbcommon])
 
-executable('probe-im', 'probe-im.c', client_proto['input-method-unstable-v2'],
+e2e_helpers += executable('probe-im', 'probe-im.c', client_proto['input-method-unstable-v2'],
   dependencies: [wayland_client])
 
-executable('probe-x11', 'probe-x11.c', dependencies: [xcb, xcb_icccm])
+e2e_helpers += executable('probe-x11', 'probe-x11.c', dependencies: [xcb, xcb_icccm])
+
+if sdbus.found()
+  e2e_helpers += executable('mock-logind', 'mock-logind.c', dependencies: [sdbus])
+endif
+
+if sdbus.found()
+  e2e_helpers += executable('mock-sni', 'mock-sni.c', dependencies: [sdbus])
+endif

@@ -48,8 +48,8 @@ static void parse_desktop(struct app_list *list, const char *path, const char *i
 		return;
 	}
 	char line[4096];
-	bool in_entry = false, hidden = false, is_app = false, terminal = false;
-	char *name = NULL, *exec = NULL;
+	bool in_entry = false, hidden = false, is_app = false, terminal = false, is_nodisplay = false;
+	char *name = NULL, *exec = NULL, *icon = NULL, *wmclass = NULL;
 	while (fgets(line, sizeof(line), f)) {
 		line[strcspn(line, "\r\n")] = '\0';
 		if (line[0] == '[') {
@@ -63,7 +63,14 @@ static void parse_desktop(struct app_list *list, const char *path, const char *i
 			name = strdup(line + 5);
 		} else if (!strncmp(line, "Exec=", 5) && !exec) {
 			exec = strdup(line + 5);
-		} else if (!strcmp(line, "NoDisplay=true") || !strcmp(line, "Hidden=true")) {
+		} else if (!strncmp(line, "Icon=", 5) && !icon) {
+			icon = strdup(line + 5);
+		} else if (!strncmp(line, "StartupWMClass=", 15) && !wmclass) {
+			wmclass = strdup(line + 15);
+		} else if (!strcmp(line, "NoDisplay=true")) {
+			hidden = true; /* still useful to find the icon of a running window */
+			is_nodisplay = true;
+		} else if (!strcmp(line, "Hidden=true")) {
 			hidden = true;
 		} else if (!strcmp(line, "Type=Application")) {
 			is_app = true;
@@ -72,8 +79,9 @@ static void parse_desktop(struct app_list *list, const char *path, const char *i
 		}
 	}
 	fclose(f);
-	if (is_app && !hidden && name && exec) {
-		struct app_entry e = {strdup(id), name, apps_strip_field_codes(exec), terminal};
+	if (is_app && (!hidden || is_nodisplay) && name && exec) {
+		struct app_entry e = {strdup(id), name, apps_strip_field_codes(exec), terminal, icon, wmclass,
+			is_nodisplay};
 		free(exec);
 		struct app_entry *n = realloc(list->items, (list->len + 1) * sizeof(*n));
 		if (!n) {
@@ -85,6 +93,8 @@ static void parse_desktop(struct app_list *list, const char *path, const char *i
 	}
 	free(name);
 	free(exec);
+	free(icon);
+	free(wmclass);
 }
 
 static void scan_dir(struct app_list *list, const char *dir) {
@@ -138,6 +148,8 @@ void apps_free(struct app_list *list) {
 		free(list->items[i].id);
 		free(list->items[i].name);
 		free(list->items[i].exec);
+		free(list->items[i].icon);
+		free(list->items[i].wmclass);
 	}
 	free(list->items);
 	list->items = NULL;
@@ -150,6 +162,9 @@ size_t apps_match(const struct app_list *list, const char *query, size_t *out, s
 	for (int pass = 0; pass < 2 && n < max; pass++) {
 		for (size_t i = 0; i < list->len && n < max; i++) {
 			const struct app_entry *e = &list->items[i];
+			if (e->nodisplay) {
+				continue;
+			}
 			bool prefix = !strncasecmp(e->name, query, strlen(query));
 			bool sub = strcasestr(e->name, query) || strcasestr(e->exec, query);
 			if ((pass == 0 && prefix) || (pass == 1 && !prefix && sub)) {
@@ -189,4 +204,36 @@ void apps_launch(const struct app_entry *app) {
 	}
 	launch_command(cmd);
 	free(cmd);
+}
+
+/* Same matching as most docks: desktop id, StartupWMClass, then case-insensitive id. */
+const struct app_entry *apps_for_app_id(const struct app_list *list, const char *app_id) {
+	if (!app_id || !*app_id) {
+		return NULL;
+	}
+	char want[512];
+	snprintf(want, sizeof(want), "%s.desktop", app_id);
+	const struct app_entry *loose = NULL;
+	for (size_t i = 0; i < list->len; i++) {
+		const struct app_entry *e = &list->items[i];
+		if (!strcmp(e->id, want) || (e->wmclass && !strcmp(e->wmclass, app_id))) {
+			return e;
+		}
+		if (!loose && (!strcasecmp(e->id, want) || (e->wmclass && !strcasecmp(e->wmclass, app_id)))) {
+			loose = e;
+		}
+		/* reverse-DNS ids: org.kde.konsole.desktop for app_id "konsole" */
+		const char *dot = strrchr(e->id, '.');
+		if (!loose && dot && dot > e->id) {
+			const char *prev = dot;
+			while (prev > e->id && prev[-1] != '.') {
+				prev--;
+			}
+			if (prev > e->id && (size_t)(dot - prev) == strlen(app_id) &&
+					!strncasecmp(prev, app_id, (size_t)(dot - prev))) {
+				loose = e;
+			}
+		}
+	}
+	return loose;
 }

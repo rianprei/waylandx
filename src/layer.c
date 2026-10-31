@@ -27,7 +27,10 @@ void layers_update_xwayland_workareas(struct wx_server *server) {
 	struct wx_output *o;
 	wl_list_for_each(o, &server->outputs, link) {
 		if (n < 16 && !wlr_box_empty(&o->usable)) {
-			areas[n++] = o->usable;
+			struct wlr_box u = o->usable; /* in X11 screen pixels */
+			areas[n++] = (struct wlr_box){xwl_to_x11(server, u.x), xwl_to_x11(server, u.y),
+				xwl_to_x11(server, u.x + u.width) - xwl_to_x11(server, u.x),
+				xwl_to_x11(server, u.y + u.height) - xwl_to_x11(server, u.y)};
 		}
 	}
 	wlr_xwayland_set_workareas(server->xwayland, areas, n);
